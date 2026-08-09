@@ -14,6 +14,11 @@
 (declare-function company-complete-selection "company")
 (declare-function company-select-next "company")
 (declare-function company-select-previous "company")
+(declare-function clang-format "clang-format")
+(declare-function clang-format-buffer "clang-format")
+(declare-function clang-format-region "clang-format")
+(declare-function c-defun-name "cc-cmds")
+(declare-function c-mark-function "cc-cmds")
 (declare-function dired-find-alternate-file "dired")
 (declare-function dired-hide-details-mode "dired")
 (declare-function dired-up-directory "dired")
@@ -127,11 +132,13 @@
 
 (defconst my/archive-packages
   '(ace-window
+    clang-format
     company
     dashboard
     drag-stuff
     evil
     evil-collection
+    expand-region
     flyspell-correct
     flyspell-correct-helm
     helm
@@ -350,6 +357,29 @@ expects only `line:text', causing every preview to jump to line zero."
                           #'flyspell-correct-helm)
   (call-interactively #'flyspell-correct-at-point))
 
+(defun my/clang-format-region-or-buffer (&optional style)
+  "Format the active region, or the entire buffer, using clang-format.
+Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
+  (interactive)
+  (require 'clang-format)
+  (save-excursion
+    (if (use-region-p)
+        (progn
+          (clang-format-region (region-beginning) (region-end) style)
+          (message "Formatted region"))
+      (clang-format-buffer style)
+      (message "Formatted buffer %s" (buffer-name)))))
+
+(defun my/clang-format-function (&optional style)
+  "Format the current C or C++ function using clang-format and STYLE."
+  (interactive)
+  (require 'clang-format)
+  (save-excursion
+    (c-mark-function)
+    (clang-format (region-beginning) (region-end) style)
+    (deactivate-mark)
+    (message "Formatted function %s" (or (c-defun-name) "at point"))))
+
 (defvar my/helm-project-return-directory nil
   "Project directory to re-enter after leaving a flat Projectile picker.")
 
@@ -539,11 +569,24 @@ expects only `line:text', causing every preview to jump to line zero."
   :doc "Compilation commands."
   :name "compile"
   "C" #'compile
+  "F" #'clang-format-buffer
   "N" #'previous-error
   "c" #'compile
+  "f" #'my/clang-format-region-or-buffer
   "k" #'kill-compilation
   "n" #'next-error
   "r" #'recompile)
+
+(defvar-keymap my/c-c++-format-map
+  :doc "C/C++ formatting commands."
+  :name "format"
+  "=" #'my/clang-format-region-or-buffer
+  "f" #'my/clang-format-function)
+
+(defvar-keymap my/c-c++-leader-map
+  :doc "C/C++ commands."
+  :name "C/C++"
+  "=" my/c-c++-format-map)
 
 (defvar-keymap my/leader-org-map
   :doc "Org commands."
@@ -679,6 +722,7 @@ expects only `line:text', causing every preview to jump to line zero."
   "p" my/leader-project-map
   "s" my/leader-search-map
   "t" my/leader-toggle-map
+  "v" #'er/expand-region
   "w" my/leader-window-map)
 
 ;; `defvar-keymap' intentionally preserves an existing value.  Set additions
@@ -686,11 +730,14 @@ expects only `line:text', causing every preview to jump to line zero."
 (keymap-set my/leader-map "*" #'helm-do-ag-project-root)
 (keymap-set my/leader-map "b h" #'dashboard-open)
 (keymap-set my/leader-map "f s" #'save-buffer)
+(keymap-set my/leader-map "c f" #'my/clang-format-region-or-buffer)
+(keymap-set my/leader-map "c F" #'clang-format-buffer)
 (keymap-set my/leader-map "j d" #'dired-jump)
 (keymap-set my/leader-map "j D" #'dired-jump-other-window)
 (keymap-set my/leader-map "s e" #'evil-iedit-state/iedit-mode)
 (keymap-set my/leader-map "s s" #'my/helm-search-current-file-empty)
 (keymap-set my/leader-map "s S" #'helm-do-ag-this-file)
+(keymap-set my/leader-map "v" #'er/expand-region)
 
 ;;; Evil and key discovery
 
@@ -1060,6 +1107,32 @@ expects only `line:text', causing every preview to jump to line zero."
   (keymap-set evil-iedit-state-map "SPC" my/leader-map))
 
 ;;; Completion and language modes
+
+(use-package expand-region
+  :defer t
+  :commands er/expand-region
+  :custom
+  (expand-region-contract-fast-key "V")
+  (expand-region-reset-fast-key "r"))
+
+(use-package clang-format
+  :defer t
+  :commands (clang-format-buffer clang-format-region)
+  :custom
+  (clang-format-executable
+   (or (executable-find "clang-format")
+       (and (file-executable-p
+             "/Library/Developer/CommandLineTools/usr/bin/clang-format")
+            "/Library/Developer/CommandLineTools/usr/bin/clang-format")
+       "clang-format"))
+  ;; Prefer a project's .clang-format; remain useful when it has none.
+  (clang-format-fallback-style "LLVM"))
+
+(with-eval-after-load 'cc-mode
+  (evil-define-key '(normal motion) c-mode-map
+    (kbd ",") my/c-c++-leader-map)
+  (evil-define-key '(normal motion) c++-mode-map
+    (kbd ",") my/c-c++-leader-map))
 
 (defun my/company-setup ()
   "Enable a small set of useful Company backends in this buffer."
