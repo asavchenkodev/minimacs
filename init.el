@@ -8,36 +8,60 @@
 
 (require 'package)
 (require 'seq)
+(require 'subr-x)
 
 (declare-function company-complete-common-or-cycle "company")
 (declare-function company-complete-selection "company")
 (declare-function company-select-next "company")
 (declare-function company-select-previous "company")
 (declare-function dired-find-alternate-file "dired")
+(declare-function dired-hide-details-mode "dired")
 (declare-function dired-up-directory "dired")
+(declare-function etags-regen--tags-cleanup "etags-regen")
+(declare-function etags-regen--tags-generate "etags-regen")
+(declare-function evil-iedit-state/iedit-mode "evil-iedit-state")
+(declare-function evil-define-key* "evil-core")
 (declare-function flyspell-goto-next-error "flyspell")
+(declare-function flymake-mode "flymake")
 (declare-function helm-autoresize-mode "helm")
+(declare-function helm-find-files-1 "helm-files")
+(declare-function helm-find-files-down-last-level "helm-files")
+(declare-function helm-find-files-up-one-level "helm-files")
 (declare-function helm-do-ag-this-file "helm-ag")
+(declare-function helm-ag--do-ag-up-one-level "helm-ag")
+(declare-function helm-ag--up-one-level "helm-ag")
 (declare-function helm-execute-persistent-action "helm")
 (declare-function helm-keyboard-quit "helm")
 (declare-function helm-next-line "helm")
 (declare-function helm-previous-page "helm")
 (declare-function helm-previous-line "helm")
+(declare-function helm-run-after-exit "helm")
 (declare-function helm-select-action "helm")
 (declare-function helm-set-local-variable "helm")
 (declare-function kill-compilation "compile")
 (declare-function projectile-switch-project-by-name "projectile")
+(declare-function projectile-save-known-projects "projectile")
 (declare-function recompile "compile")
+(declare-function tags-reset-tags-tables "etags")
 
 (defvar helm-ag--default-target)
+(defvar helm-input)
+(defvar evil-iedit-state-map)
+(defvar xref--xref-buffer-mode-map)
+(defvar org-persist--disable-when-emacs-Q)
+(defvar projectile-known-projects)
+(defvar treemacs-last-error-persist-file)
+(defvar treemacs-persist-file)
 
 (defconst my/var-directory (expand-file-name "var/" user-emacs-directory))
 (defconst my/backup-directory (expand-file-name "backups/" my/var-directory))
 (defconst my/autosave-directory (expand-file-name "auto-save/" my/var-directory))
+(defconst my/tags-directory (expand-file-name "tags/" my/var-directory))
 
 (dolist (directory (list my/var-directory
                          my/backup-directory
-                         my/autosave-directory))
+                         my/autosave-directory
+                         my/tags-directory))
   (make-directory directory t))
 
 (setq package-user-dir (expand-file-name "elpa/" user-emacs-directory)
@@ -51,6 +75,7 @@
       transient-levels-file (expand-file-name "transient-levels.el" my/var-directory)
       transient-values-file (expand-file-name "transient-values.el" my/var-directory)
       org-persist-directory (expand-file-name "org-persist/" my/var-directory)
+      org-persist--disable-when-emacs-Q nil
       auto-save-list-file-prefix (expand-file-name ".saves-" my/autosave-directory)
       backup-directory-alist `(("." . ,my/backup-directory))
       auto-save-file-name-transforms `((".*" ,my/autosave-directory t)))
@@ -103,6 +128,7 @@
 (defconst my/archive-packages
   '(ace-window
     company
+    dashboard
     drag-stuff
     evil
     evil-collection
@@ -110,10 +136,13 @@
     flyspell-correct-helm
     helm
     helm-projectile
+    iedit
     magit
+    nerd-icons
     planet-theme
     projectile
     shell-pop
+    treemacs-icons-dired
     vterm
     winum)
   "Packages installed from GNU ELPA, NonGNU ELPA, or MELPA.")
@@ -122,8 +151,9 @@
   "Install missing packages, refreshing archives only when necessary."
   (let ((missing (seq-remove #'package-installed-p my/archive-packages)))
     (when missing
-      (unless package-archive-contents
-        (package-refresh-contents))
+      ;; A saved archive index can refer to MELPA snapshots that have already
+      ;; rotated out.  Refresh only on a genuinely missing-package bootstrap.
+      (package-refresh-contents)
       (dolist (package missing)
         (package-install package)))))
 
@@ -138,6 +168,16 @@
    "8d61b22ad5b0fdc2715779bae0312305499bb643"
    'Git
    'helm-ag))
+
+;; Use the same Evil Iedit revision as the existing Spacemacs profile.  It is
+;; kept profile-local and only downloaded during a missing-package bootstrap.
+(unless (package-installed-p 'evil-iedit-state)
+  (require 'package-vc)
+  (package-vc-install
+   "https://github.com/smile13241324/evil-iedit-state.git"
+   "a44bc05acb49708aba124129d0e941084e8e14b6"
+   'Git
+   'evil-iedit-state))
 
 (require 'use-package)
 (setq use-package-always-ensure nil)
@@ -310,147 +350,102 @@ expects only `line:text', causing every preview to jump to line zero."
                           #'flyspell-correct-helm)
   (call-interactively #'flyspell-correct-at-point))
 
-;;; Home buffer
+(defvar my/helm-project-return-directory nil
+  "Project directory to re-enter after leaving a flat Projectile picker.")
 
-(defconst my/home-buffer-name "*home*")
-(defconst my/home-items-limit 10)
-
-(defvar-keymap my/home-mode-map
-  :parent special-mode-map
-  "<backtab>" #'backward-button
-  "TAB" #'forward-button
-  "g" #'my/home-refresh
-  "q" #'bury-buffer)
-
-(define-derived-mode my/home-mode special-mode "Home"
-  "Major mode for the lightweight startup page."
-  (setq-local show-trailing-whitespace nil))
-
-(defun my/home-read-data (file)
-  "Read and return the first Lisp value in FILE, or nil."
-  (when (file-readable-p file)
-    (condition-case nil
-        (with-temp-buffer
-          (insert-file-contents file)
-          (goto-char (point-min))
-          (read (current-buffer)))
-      (error nil))))
-
-(defun my/home-recent-project-roots ()
-  "Return project roots inferred from `recentf-list'."
-  (delq nil
-        (mapcar
-         (lambda (file)
-           (unless (file-remote-p file)
-             (let ((directory (file-name-directory (expand-file-name file))))
-               (when (file-directory-p directory)
-                 (or (locate-dominating-file directory ".projectile")
-                     (locate-dominating-file directory ".git"))))))
-         recentf-list)))
-
-(defun my/home-project-roots ()
-  "Return recently used project roots without loading Projectile."
-  (let* ((projectile-data
-          (my/home-read-data
-           (expand-file-name "projectile-bookmarks.eld" my/var-directory)))
-         (project-data (my/home-read-data project-list-file))
-         (project-roots
-          (mapcar (lambda (entry)
-                    (if (stringp entry) entry (car-safe entry)))
-                  project-data))
-         (roots (delete-dups
-                 (append projectile-data
-                         (my/home-recent-project-roots)
-                         project-roots))))
-    (seq-take
-     (seq-filter
-      (lambda (root)
-        (let ((expanded (and (stringp root) (expand-file-name root))))
-          (and expanded
-               (not (file-remote-p expanded))
-               (file-directory-p expanded)
-               (not (file-in-directory-p expanded package-user-dir)))))
-      roots)
-     my/home-items-limit)))
-
-(defun my/home-file-label (file)
-  "Return the home-page label for FILE."
-  (let ((expanded (expand-file-name file)))
-    (format "%-28s %s"
-            (file-name-nondirectory expanded)
-            (abbreviate-file-name (file-name-directory expanded)))))
-
-(defun my/home-project-label (project)
-  "Return the home-page label for PROJECT."
-  (let ((expanded (directory-file-name (expand-file-name project))))
-    (format "%-28s %s"
-            (file-name-nondirectory expanded)
-            (abbreviate-file-name expanded))))
-
-(defun my/home-open-file (button)
-  "Visit the file stored in BUTTON."
-  (find-file (button-get button 'my/path)))
-
-(defun my/home-open-project (button)
-  "Switch to the project stored in BUTTON."
-  (require 'projectile)
-  (projectile-switch-project-by-name (button-get button 'my/path)))
-
-(defun my/home-insert-section (title items label-function action)
-  "Insert a TITLE section of ITEMS using LABEL-FUNCTION and ACTION."
-  (insert (propertize title 'face '(:inherit font-lock-keyword-face
-                                    :weight bold :height 1.2))
-          "\n\n")
-  (if items
-      (dolist (item items)
-        (insert "  ")
-        (insert-text-button (funcall label-function item)
-                            'action action
-                            'my/path item
-                            'follow-link t
-                            'help-echo (expand-file-name item)
-                            'face 'link)
-        (insert "\n"))
-    (insert (propertize "  Nothing recorded yet.\n" 'face 'shadow)))
-  (insert "\n"))
-
-(defun my/home-refresh ()
-  "Refresh the lightweight home buffer."
+(defun my/helm-projectile-parent-browser ()
+  "Leave Projectile's flat file list and browse its parent with Helm."
   (interactive)
-  (let ((buffer (get-buffer-create my/home-buffer-name)))
-    (with-current-buffer buffer
-      (my/home-mode)
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert "\n    "
-                (propertize "EMACS" 'face '(:inherit font-lock-function-name-face
-                                             :weight bold :height 2.0))
-                "\n    A small, fast standalone profile\n\n")
-        (my/home-insert-section
-         "Recent files"
-         (seq-take recentf-list my/home-items-limit)
-         #'my/home-file-label #'my/home-open-file)
-        (my/home-insert-section
-         "Projects"
-         (my/home-project-roots)
-         #'my/home-project-label #'my/home-open-project)
-        (insert (propertize
-                 "  RET open    TAB next    g refresh    q close\n"
-                 'face 'shadow))
-        (goto-char (point-min))
-        (ignore-errors (forward-button 1))
-        (set-buffer-modified-p nil)))
-    buffer))
+  (let* ((root (file-name-as-directory (projectile-project-root)))
+         (parent (file-name-directory (directory-file-name root))))
+    (setq my/helm-project-return-directory root)
+    (helm-run-after-exit #'helm-find-files-1 parent)))
 
-(defun my/home ()
-  "Show and return the lightweight home buffer."
+(defun my/helm-find-files-forward ()
+  "Return to a project left with `C-h', or enter Helm's last child."
   (interactive)
-  (let ((buffer (my/home-refresh)))
-    (when (called-interactively-p 'interactive)
-      (switch-to-buffer buffer))
-    buffer))
+  (if my/helm-project-return-directory
+      (let ((directory my/helm-project-return-directory))
+        (setq my/helm-project-return-directory nil)
+        (helm-run-after-exit #'helm-find-files-1 directory))
+    (helm-find-files-down-last-level)))
 
-(setq initial-buffer-choice #'my/home)
+(defvar my/helm-ag-directory-stack nil
+  "Directories left through parent navigation in a Helm Ag session.")
+
+(defvar my/helm-ag-navigation-in-progress nil)
+
+(defun my/helm-ag-reset-directory-stack (original &rest arguments)
+  "Reset parent navigation before calling ORIGINAL with ARGUMENTS."
+  (unless my/helm-ag-navigation-in-progress
+    (setq my/helm-ag-directory-stack nil))
+  (apply original arguments))
+
+(defun my/helm-ag-up-one-level ()
+  "Search one directory higher with synchronous Helm Ag."
+  (interactive)
+  (push (file-name-as-directory default-directory)
+        my/helm-ag-directory-stack)
+  (helm-ag--up-one-level))
+
+(defun my/helm-do-ag-up-one-level ()
+  "Search one directory higher with asynchronous Helm Ag."
+  (interactive)
+  (push (file-name-as-directory default-directory)
+        my/helm-ag-directory-stack)
+  (helm-ag--do-ag-up-one-level))
+
+(defun my/helm-ag-down-one-level ()
+  "Return to the most recently left Helm Ag search directory."
+  (interactive)
+  (if-let ((directory (pop my/helm-ag-directory-stack)))
+      (let ((input helm-input))
+        (helm-run-after-exit
+         (lambda ()
+           (let ((my/helm-ag-navigation-in-progress t))
+             (helm-do-ag directory nil input)))))
+    (user-error "No child search directory to return to")))
+
+(defun my/project-tags-file (root)
+  "Return a profile-local, distinct tags file for project ROOT."
+  (let* ((directory-name
+          (file-name-nondirectory (directory-file-name root)))
+         (safe-name (replace-regexp-in-string "[^[:alnum:]_.-]" "_"
+                                              directory-name))
+         (digest (substring (secure-hash 'sha1 (expand-file-name root)) 0 12)))
+    (expand-file-name (format "%s-%s-TAGS" safe-name digest)
+                      my/tags-directory)))
+
+(defun my/rebuild-project-tags ()
+  "Discard and immediately rebuild automatic ETAGS for this project."
+  (interactive)
+  (require 'project)
+  (require 'etags-regen)
+  (let* ((project (project-current t))
+         (root (project-root project))
+         (tags-file (my/project-tags-file root)))
+    (etags-regen--tags-cleanup)
+    (when-let ((buffer (get-file-buffer tags-file)))
+      (kill-buffer buffer))
+    (when (file-exists-p tags-file)
+      (delete-file tags-file))
+    (tags-reset-tags-tables)
+    (etags-regen--tags-generate project)
+    (message "Rebuilt tags for %s" (abbreviate-file-name root))))
+
+(defun my/disable-flymake ()
+  "Keep automatic code diagnostics disabled in this profile."
+  (when (bound-and-true-p flymake-mode)
+    (flymake-mode -1)))
+
+(add-hook 'flymake-mode-hook #'my/disable-flymake)
+
+;;; Dashboard support
+
+(defun my/nerd-icons-font-available-p ()
+  "Return non-nil when the Symbols Nerd Font is installed."
+  (and (display-graphic-p)
+       (find-font (font-spec :family "Symbols Nerd Font Mono"))))
 
 ;;; Native leader keymaps
 
@@ -458,25 +453,49 @@ expects only `line:text', causing every preview to jump to line zero."
   :doc "Buffer commands."
   :name "buffers"
   "b" #'helm-mini
-  "h" #'my/home)
+  "d" #'kill-current-buffer
+  "h" #'dashboard-open
+  "n" #'next-buffer
+  "p" #'previous-buffer
+  "R" #'revert-buffer
+  "s" #'scratch-buffer
+  "w" #'read-only-mode
+  "x" #'kill-buffer-and-window)
 
 (defvar-keymap my/leader-file-map
   :doc "File commands."
   :name "files"
+  "b" #'helm-filtered-bookmarks
   "f" #'helm-find-files
   "j" #'dired-jump
-  "s" #'save-buffer)
+  "r" #'helm-recentf
+  "s" #'save-buffer
+  "S" #'save-some-buffers)
 
 (defvar-keymap my/leader-project-map
   :doc "Project commands."
   :name "projects"
+  "!" #'projectile-run-shell-command-in-root
+  "&" #'projectile-run-async-shell-command-in-root
+  "%" #'projectile-replace-regexp
   "b" #'helm-projectile-switch-to-buffer
   "c" #'projectile-compile-project
+  "u" #'projectile-run-project
   "d" #'helm-projectile-find-dir
+  "D" #'projectile-dired
+  "E" #'projectile-find-references
   "f" #'helm-projectile-find-file
   "F" #'helm-projectile-find-file-dwim
+  "g" #'xref-find-definitions
+  "G" #'my/rebuild-project-tags
+  "I" #'projectile-invalidate-cache
+  "k" #'projectile-kill-buffers
   "/" #'helm-do-ag-project-root
-  "p" #'helm-projectile-switch-project)
+  "p" #'helm-projectile-switch-project
+  "r" #'projectile-recentf
+  "R" #'projectile-replace
+  "T" #'projectile-test-project
+  "v" #'projectile-vc)
 
 (defvar-keymap my/leader-search-ag-map
   :doc "Spacemacs-compatible helm-ag aliases."
@@ -492,17 +511,34 @@ expects only `line:text', causing every preview to jump to line zero."
   "S" #'helm-do-ag-this-file
   "a" my/leader-search-ag-map
   "d" #'helm-do-ag
+  "e" #'evil-iedit-state/iedit-mode
   "p" #'helm-do-ag-project-root
   "s" #'my/helm-search-current-file-empty)
+
+(defvar-keymap my/leader-git-file-map
+  :doc "Git file commands."
+  :name "files"
+  "F" #'magit-find-file
+  "d" #'magit-diff
+  "l" #'magit-log-buffer-file
+  "m" #'magit-file-dispatch)
 
 (defvar-keymap my/leader-git-map
   :doc "Git commands."
   :name "git"
-  "s" #'magit-status)
+  "c" #'magit-clone
+  "f" my/leader-git-file-map
+  "i" #'magit-init
+  "L" #'magit-list-repositories
+  "m" #'magit-dispatch
+  "s" #'magit-status
+  "S" #'magit-stage-files
+  "U" #'magit-unstage-files)
 
 (defvar-keymap my/leader-compilation-map
   :doc "Compilation commands."
   :name "compile"
+  "C" #'compile
   "N" #'previous-error
   "c" #'compile
   "k" #'kill-compilation
@@ -533,6 +569,26 @@ expects only `line:text', causing every preview to jump to line zero."
   "d" #'dired
   "o" my/leader-org-map
   "t" my/leader-terminal-map)
+
+(defvar-keymap my/leader-jump-map
+  :doc "Jump commands."
+  :name "jump"
+  "d" #'dired-jump
+  "D" #'dired-jump-other-window)
+
+(defvar-keymap my/leader-help-describe-map
+  :doc "Describe commands."
+  :name "describe"
+  "b" #'describe-bindings
+  "f" #'describe-function
+  "k" #'describe-key
+  "m" #'describe-mode
+  "v" #'describe-variable)
+
+(defvar-keymap my/leader-help-map
+  :doc "Help commands."
+  :name "help"
+  "d" my/leader-help-describe-map)
 
 (defvar-keymap my/leader-custom-map
   :doc "Personal commands."
@@ -617,6 +673,8 @@ expects only `line:text', causing every preview to jump to line zero."
   "d" my/leader-custom-map
   "f" my/leader-file-map
   "g" my/leader-git-map
+  "h" my/leader-help-map
+  "j" my/leader-jump-map
   "n" my/leader-narrow-map
   "p" my/leader-project-map
   "s" my/leader-search-map
@@ -626,8 +684,11 @@ expects only `line:text', causing every preview to jump to line zero."
 ;; `defvar-keymap' intentionally preserves an existing value.  Set additions
 ;; explicitly too, so evaluating init.el in a running Emacs updates the map.
 (keymap-set my/leader-map "*" #'helm-do-ag-project-root)
-(keymap-set my/leader-map "b h" #'my/home)
+(keymap-set my/leader-map "b h" #'dashboard-open)
 (keymap-set my/leader-map "f s" #'save-buffer)
+(keymap-set my/leader-map "j d" #'dired-jump)
+(keymap-set my/leader-map "j D" #'dired-jump-other-window)
+(keymap-set my/leader-map "s e" #'evil-iedit-state/iedit-mode)
 (keymap-set my/leader-map "s s" #'my/helm-search-current-file-empty)
 (keymap-set my/leader-map "s S" #'helm-do-ag-this-file)
 
@@ -637,21 +698,34 @@ expects only `line:text', causing every preview to jump to line zero."
   :demand t
   :config
   (evil-mode 1)
-  (evil-set-initial-state 'my/home-mode 'motion)
-  (evil-define-key 'motion my/home-mode-map
-    (kbd "<backtab>") #'backward-button
-    (kbd "TAB") #'forward-button
-    (kbd "g") #'my/home-refresh
-    (kbd "q") #'bury-buffer)
   (evil-define-key '(normal motion visual) 'global
     (kbd "C-u") #'evil-scroll-up)
+  (evil-define-key '(normal motion) 'global
+    (kbd "g b") #'xref-go-back
+    (kbd "g d") #'xref-find-definitions
+    (kbd "g D") #'xref-find-definitions-other-window
+    (kbd "g f") #'find-file-at-point
+    (kbd "g r") #'xref-find-references)
   (evil-define-key '(normal motion visual) 'global (kbd "SPC") my/leader-map)
   (evil-define-key '(insert emacs) 'global (kbd "M-m") my/leader-map))
 
-(defun my/evil-collection-local-bindings (mode _maps)
+(defun my/bind-leader-in-keymap (map)
+  "Make the global leader authoritative in Evil states for MAP."
+  (let ((keymap (if (symbolp map)
+                    (and (boundp map) (symbol-value map))
+                  map)))
+    (when (keymapp keymap)
+      (evil-define-key* '(normal motion visual) keymap
+                        (kbd "SPC") my/leader-map))))
+
+(defun my/evil-collection-local-bindings (mode maps)
   "Apply personal bindings after Evil Collection configures MODE."
+  (dolist (map maps)
+    (my/bind-leader-in-keymap map))
   (when (eq mode 'dired)
     (evil-define-key 'normal dired-mode-map
+      (kbd "C-h") #'dired-up-directory
+      (kbd "C-l") #'dired-find-alternate-file
       (kbd "h") #'dired-up-directory
       (kbd "l") #'dired-find-alternate-file)))
 
@@ -680,6 +754,8 @@ expects only `line:text', causing every preview to jump to line zero."
     "d" "custom"
     "f" "files"
     "g" "git"
+    "h" "help"
+    "j" "jump"
     "n" "narrow"
     "p" "projects"
     "s" "search"
@@ -714,7 +790,12 @@ expects only `line:text', causing every preview to jump to line zero."
 
 (use-package helm
   :defer t
-  :commands (helm-M-x helm-mini helm-buffers-list helm-find-files)
+  :commands (helm-M-x
+             helm-mini
+             helm-buffers-list
+             helm-filtered-bookmarks
+             helm-find-files
+             helm-recentf)
   :bind (("M-x" . helm-M-x)
          ("C-x C-f" . helm-find-files)
          ("C-x b" . helm-buffers-list))
@@ -757,15 +838,33 @@ expects only `line:text', causing every preview to jump to line zero."
   (keymap-set helm-map "<tab>" #'helm-execute-persistent-action)
   (keymap-set helm-map "C-z" #'helm-select-action)
   (keymap-set helm-map "<escape>" #'helm-keyboard-quit)
+  (keymap-set helm-find-files-map "C-h" #'helm-find-files-up-one-level)
+  (keymap-set helm-find-files-map "C-l" #'my/helm-find-files-forward)
   (helm-autoresize-mode 1))
 
 (use-package projectile
   :defer t
-  :commands (projectile-compile-project projectile-project-root)
+  :commands (projectile-compile-project
+             projectile-dired
+             projectile-find-references
+             projectile-invalidate-cache
+             projectile-kill-buffers
+             projectile-project-root
+             projectile-recentf
+             projectile-replace
+             projectile-replace-regexp
+             projectile-run-async-shell-command-in-root
+             projectile-run-project
+             projectile-run-shell-command-in-root
+             projectile-test-project
+             projectile-vc)
   :init
   (setq projectile-completion-system 'helm
         projectile-indexing-method 'hybrid
+        projectile-enable-caching t
         projectile-cache-file (expand-file-name "projectile-cache.el" my/var-directory)
+        projectile-frecency-file
+        (expand-file-name "projectile-frecency.eld" my/var-directory)
         projectile-known-projects-file
         (expand-file-name "projectile-bookmarks.eld" my/var-directory)))
 
@@ -783,7 +882,61 @@ expects only `line:text', causing every preview to jump to line zero."
   (setq projectile-switch-project-action #'helm-projectile
         helm-projectile-set-input-automatically t)
   :config
+  (keymap-set helm-projectile-find-file-map
+              "C-h" #'my/helm-projectile-parent-browser)
   (helm-projectile-mode 1))
+
+(use-package nerd-icons
+  :defer t)
+
+(defun my/register-recent-projects ()
+  "Teach Projectile about Git projects represented in `recentf-list'."
+  (let ((projects
+         (delete-dups
+          (delq nil
+                (mapcar
+                 (lambda (file)
+                   (unless (file-remote-p file)
+                     (let ((directory (file-name-directory
+                                       (expand-file-name file))))
+                       (when (file-directory-p directory)
+                         (or (locate-dominating-file directory ".projectile")
+                             (locate-dominating-file directory ".git"))))))
+                 recentf-list)))))
+    (unless (seq-every-p (lambda (root)
+                           (member root projectile-known-projects))
+                         projects)
+      (setq projectile-known-projects
+            (delete-dups (append projects projectile-known-projects)))
+      (projectile-save-known-projects))))
+
+(use-package dashboard
+  :demand t
+  :init
+  (setq dashboard-startup-banner 'official
+        dashboard-banner-logo-title "Welcome back"
+        dashboard-center-content t
+        dashboard-vertically-center-content t
+        dashboard-navigation-cycle t
+        dashboard-projects-backend 'projectile
+        dashboard-items '((recents . 8)
+                          (projects . 8))
+        dashboard-item-shortcuts '((recents . "r")
+                                   (projects . "p"))
+        dashboard-set-heading-icons t
+        dashboard-set-file-icons t
+        dashboard-icon-type 'nerd-icons
+        dashboard-display-icons-p (my/nerd-icons-font-available-p)
+        dashboard-set-init-info t
+        dashboard-footer-messages
+        '("SPC SPC commands  •  SPC p p projects  •  SPC f f files"))
+  :config
+  (require 'projectile)
+  (projectile-mode 1)
+  (my/register-recent-projects)
+  (dashboard-setup-startup-hook)
+  (evil-set-initial-state 'dashboard-mode 'motion)
+  (my/bind-leader-in-keymap dashboard-mode-map))
 
 (use-package helm-ag
   :defer t
@@ -798,16 +951,73 @@ expects only `line:text', causing every preview to jump to line zero."
   (helm-ag-success-exit-status '(0 1))
   (helm-ag-use-grep-ignore-list t)
   :config
+  (keymap-set helm-ag-map "C-h" #'my/helm-ag-up-one-level)
+  (keymap-set helm-ag-map "C-l" #'my/helm-ag-down-one-level)
+  (keymap-set helm-do-ag-map "C-h" #'my/helm-do-ag-up-one-level)
+  (keymap-set helm-do-ag-map "C-l" #'my/helm-ag-down-one-level)
+  (my/bind-leader-in-keymap helm-ag-edit-map)
+  (unless (advice-member-p #'my/helm-ag-reset-directory-stack 'helm-do-ag)
+    (advice-add 'helm-do-ag :around #'my/helm-ag-reset-directory-stack))
   (unless (advice-member-p #'my/helm-ag-omit-duplicate-current-file
                            'helm-ag--construct-command)
     (advice-add 'helm-ag--construct-command :around
                 #'my/helm-ag-omit-duplicate-current-file)))
 
+;;; Automatic project tags and xref
+
+(setq etags-regen-program "/opt/homebrew/bin/etags"
+      etags-regen-tags-file #'my/project-tags-file
+      etags-regen-ignores
+      '("build" "build-*" "cmake-build-*" "dist" "target"
+        "node_modules" ".cache" ".venv" "venv" "vendor" "third_party"))
+
+(require 'etags-regen)
+(etags-regen-mode 1)
+
+(with-eval-after-load 'xref
+  (keymap-set xref--xref-buffer-mode-map "C-h" #'xref-go-back)
+  (keymap-set xref--xref-buffer-mode-map "C-l" #'xref-go-forward)
+  (evil-set-initial-state 'xref--xref-buffer-mode 'motion)
+  (my/bind-leader-in-keymap xref--xref-buffer-mode-map))
+
 ;;; Magit, compilation, Dired, and terminal
 
 (use-package magit
   :defer t
-  :commands magit-status)
+  :commands (magit-clone
+             magit-diff
+             magit-dispatch
+             magit-file-dispatch
+             magit-find-file
+             magit-init
+             magit-list-repositories
+             magit-log-buffer-file
+             magit-stage-files
+             magit-status
+             magit-unstage-files)
+  :config
+  (my/bind-leader-in-keymap magit-mode-map))
+
+(with-eval-after-load 'compile
+  (my/bind-leader-in-keymap compilation-mode-map))
+
+(with-eval-after-load 'dired
+  (my/bind-leader-in-keymap dired-mode-map)
+  (evil-define-key '(normal motion) dired-mode-map
+    (kbd "C-h") #'dired-up-directory
+    (kbd "C-l") #'dired-find-alternate-file
+    (kbd "h") #'dired-up-directory
+    (kbd "l") #'dired-find-alternate-file))
+
+(use-package treemacs-icons-dired
+  :defer t
+  :commands treemacs-icons-dired-mode
+  :init
+  (setq treemacs-persist-file
+        (expand-file-name "treemacs-persist" my/var-directory)
+        treemacs-last-error-persist-file
+        (expand-file-name "treemacs-persist-at-last-error" my/var-directory))
+  :hook (dired-mode . treemacs-icons-dired-enable-once))
 
 (use-package ace-window
   :defer t
@@ -836,7 +1046,18 @@ expects only `line:text', causing every preview to jump to line zero."
   :init
   (setq vterm-shell (or (getenv "SHELL") shell-file-name)
         vterm-max-scrollback 10000
-        vterm-always-compile-module t))
+        vterm-always-compile-module t)
+  :config
+  (my/bind-leader-in-keymap vterm-mode-map))
+
+(use-package evil-iedit-state
+  :defer t
+  :commands evil-iedit-state/iedit-mode
+  :config
+  (set-face-attribute 'iedit-occurrence nil
+                      :inherit 'error :foreground 'unspecified
+                      :background 'unspecified :weight 'bold)
+  (keymap-set evil-iedit-state-map "SPC" my/leader-map))
 
 ;;; Completion and language modes
 
