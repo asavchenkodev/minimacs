@@ -17,11 +17,19 @@
 (declare-function dired-up-directory "dired")
 (declare-function flyspell-goto-next-error "flyspell")
 (declare-function helm-autoresize-mode "helm")
+(declare-function helm-do-ag-this-file "helm-ag")
+(declare-function helm-execute-persistent-action "helm")
 (declare-function helm-keyboard-quit "helm")
 (declare-function helm-next-line "helm")
+(declare-function helm-previous-page "helm")
 (declare-function helm-previous-line "helm")
+(declare-function helm-select-action "helm")
+(declare-function helm-set-local-variable "helm")
 (declare-function kill-compilation "compile")
+(declare-function projectile-switch-project-by-name "projectile")
 (declare-function recompile "compile")
+
+(defvar helm-ag--default-target)
 
 (defconst my/var-directory (expand-file-name "var/" user-emacs-directory))
 (defconst my/backup-directory (expand-file-name "backups/" my/var-directory))
@@ -47,10 +55,38 @@
       backup-directory-alist `(("." . ,my/backup-directory))
       auto-save-file-name-transforms `((".*" ,my/autosave-directory t)))
 
+(defun my/file-sha256 (file)
+  "Return the SHA-256 digest of FILE's literal bytes."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file)
+    (secure-hash 'sha256 (current-buffer))))
+
+(defun my/delete-redundant-auto-save (&rest _)
+  "Delete a newer auto-save only when it exactly matches the visited file."
+  (when buffer-file-name
+    (condition-case nil
+        (let ((auto-save (or buffer-auto-save-file-name
+                             (make-auto-save-file-name))))
+          (when (and (file-regular-p buffer-file-name)
+                     (file-regular-p auto-save)
+                     (file-newer-than-file-p auto-save buffer-file-name)
+                     (= (file-attribute-size (file-attributes auto-save))
+                        (file-attribute-size (file-attributes buffer-file-name)))
+                     (string= (my/file-sha256 auto-save)
+                              (my/file-sha256 buffer-file-name)))
+            (delete-file auto-save)))
+      (file-error nil))))
+
+;; `after-find-file' otherwise displays a recovery warning and deliberately
+;; pauses for one second, even when the auto-save is identical to the file.
+(advice-add 'after-find-file :before #'my/delete-redundant-auto-save)
+
 ;;; Package bootstrap
 
 (setq evil-want-integration t
       evil-want-keybinding nil
+      evil-want-C-u-scroll t
       evil-want-Y-yank-to-eol nil
       evil-kill-on-visual-paste nil
       evil-undo-system 'undo-redo)
@@ -78,7 +114,8 @@
     planet-theme
     projectile
     shell-pop
-    vterm)
+    vterm
+    winum)
   "Packages installed from GNU ELPA, NonGNU ELPA, or MELPA.")
 
 (defun my/install-missing-packages ()
@@ -124,6 +161,7 @@
 (column-number-mode 1)
 (setq display-line-numbers-type 'relative
       history-delete-duplicates t
+      history-length 1000
       inhibit-startup-screen t
       initial-scratch-message nil
       ring-bell-function #'ignore
@@ -132,6 +170,8 @@
 (add-hook 'prog-mode-hook #'display-line-numbers-mode)
 (add-hook 'text-mode-hook #'display-line-numbers-mode)
 
+;; Keep the Helm M-x most-recently-used section across Emacs restarts.
+(setq savehist-additional-variables '(extended-command-history))
 (savehist-mode 1)
 (recentf-mode 1)
 
@@ -163,6 +203,28 @@
   (require 'dired-x))
 
 ;;; Small commands used by the leader map
+
+(defun my/helm-search-current-file-empty ()
+  "Search the current file with an initially empty Helm input."
+  (interactive)
+  (helm-do-ag-this-file ""))
+
+(defun my/helm-ag-omit-duplicate-current-file (original this-file)
+  "Call ORIGINAL without passing THIS-FILE to ripgrep twice.
+The pinned helm-ag fork adds a current-file target both as THIS-FILE and via
+`helm-ag--default-target'.  Ripgrep then prints a filename, while helm-ag
+expects only `line:text', causing every preview to jump to line zero."
+  (let ((helm-ag--default-target
+         (if this-file
+             (seq-remove (lambda (target) (equal target this-file))
+                         helm-ag--default-target)
+           helm-ag--default-target)))
+    (funcall original this-file)))
+
+(defun my/helm-remember-origin-window ()
+  "Keep Helm persistent actions in the exact window that launched Helm."
+  (helm-set-local-variable 'helm-persistent-action-display-window
+                           (selected-window)))
 
 (defun my/helm-find-recursively ()
   "Find files recursively below a prompted directory with Helm."
@@ -248,18 +310,162 @@
                           #'flyspell-correct-helm)
   (call-interactively #'flyspell-correct-at-point))
 
+;;; Home buffer
+
+(defconst my/home-buffer-name "*home*")
+(defconst my/home-items-limit 10)
+
+(defvar-keymap my/home-mode-map
+  :parent special-mode-map
+  "<backtab>" #'backward-button
+  "TAB" #'forward-button
+  "g" #'my/home-refresh
+  "q" #'bury-buffer)
+
+(define-derived-mode my/home-mode special-mode "Home"
+  "Major mode for the lightweight startup page."
+  (setq-local show-trailing-whitespace nil))
+
+(defun my/home-read-data (file)
+  "Read and return the first Lisp value in FILE, or nil."
+  (when (file-readable-p file)
+    (condition-case nil
+        (with-temp-buffer
+          (insert-file-contents file)
+          (goto-char (point-min))
+          (read (current-buffer)))
+      (error nil))))
+
+(defun my/home-recent-project-roots ()
+  "Return project roots inferred from `recentf-list'."
+  (delq nil
+        (mapcar
+         (lambda (file)
+           (unless (file-remote-p file)
+             (let ((directory (file-name-directory (expand-file-name file))))
+               (when (file-directory-p directory)
+                 (or (locate-dominating-file directory ".projectile")
+                     (locate-dominating-file directory ".git"))))))
+         recentf-list)))
+
+(defun my/home-project-roots ()
+  "Return recently used project roots without loading Projectile."
+  (let* ((projectile-data
+          (my/home-read-data
+           (expand-file-name "projectile-bookmarks.eld" my/var-directory)))
+         (project-data (my/home-read-data project-list-file))
+         (project-roots
+          (mapcar (lambda (entry)
+                    (if (stringp entry) entry (car-safe entry)))
+                  project-data))
+         (roots (delete-dups
+                 (append projectile-data
+                         (my/home-recent-project-roots)
+                         project-roots))))
+    (seq-take
+     (seq-filter
+      (lambda (root)
+        (let ((expanded (and (stringp root) (expand-file-name root))))
+          (and expanded
+               (not (file-remote-p expanded))
+               (file-directory-p expanded)
+               (not (file-in-directory-p expanded package-user-dir)))))
+      roots)
+     my/home-items-limit)))
+
+(defun my/home-file-label (file)
+  "Return the home-page label for FILE."
+  (let ((expanded (expand-file-name file)))
+    (format "%-28s %s"
+            (file-name-nondirectory expanded)
+            (abbreviate-file-name (file-name-directory expanded)))))
+
+(defun my/home-project-label (project)
+  "Return the home-page label for PROJECT."
+  (let ((expanded (directory-file-name (expand-file-name project))))
+    (format "%-28s %s"
+            (file-name-nondirectory expanded)
+            (abbreviate-file-name expanded))))
+
+(defun my/home-open-file (button)
+  "Visit the file stored in BUTTON."
+  (find-file (button-get button 'my/path)))
+
+(defun my/home-open-project (button)
+  "Switch to the project stored in BUTTON."
+  (require 'projectile)
+  (projectile-switch-project-by-name (button-get button 'my/path)))
+
+(defun my/home-insert-section (title items label-function action)
+  "Insert a TITLE section of ITEMS using LABEL-FUNCTION and ACTION."
+  (insert (propertize title 'face '(:inherit font-lock-keyword-face
+                                    :weight bold :height 1.2))
+          "\n\n")
+  (if items
+      (dolist (item items)
+        (insert "  ")
+        (insert-text-button (funcall label-function item)
+                            'action action
+                            'my/path item
+                            'follow-link t
+                            'help-echo (expand-file-name item)
+                            'face 'link)
+        (insert "\n"))
+    (insert (propertize "  Nothing recorded yet.\n" 'face 'shadow)))
+  (insert "\n"))
+
+(defun my/home-refresh ()
+  "Refresh the lightweight home buffer."
+  (interactive)
+  (let ((buffer (get-buffer-create my/home-buffer-name)))
+    (with-current-buffer buffer
+      (my/home-mode)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "\n    "
+                (propertize "EMACS" 'face '(:inherit font-lock-function-name-face
+                                             :weight bold :height 2.0))
+                "\n    A small, fast standalone profile\n\n")
+        (my/home-insert-section
+         "Recent files"
+         (seq-take recentf-list my/home-items-limit)
+         #'my/home-file-label #'my/home-open-file)
+        (my/home-insert-section
+         "Projects"
+         (my/home-project-roots)
+         #'my/home-project-label #'my/home-open-project)
+        (insert (propertize
+                 "  RET open    TAB next    g refresh    q close\n"
+                 'face 'shadow))
+        (goto-char (point-min))
+        (ignore-errors (forward-button 1))
+        (set-buffer-modified-p nil)))
+    buffer))
+
+(defun my/home ()
+  "Show and return the lightweight home buffer."
+  (interactive)
+  (let ((buffer (my/home-refresh)))
+    (when (called-interactively-p 'interactive)
+      (switch-to-buffer buffer))
+    buffer))
+
+(setq initial-buffer-choice #'my/home)
+
 ;;; Native leader keymaps
 
 (defvar-keymap my/leader-buffer-map
   :doc "Buffer commands."
   :name "buffers"
-  "b" #'helm-mini)
+  "b" #'helm-mini
+  "h" #'my/home)
 
 (defvar-keymap my/leader-file-map
   :doc "File commands."
   :name "files"
   "f" #'helm-find-files
-  "j" #'dired-jump)
+  "j" #'dired-jump
+  "s" #'save-buffer)
 
 (defvar-keymap my/leader-project-map
   :doc "Project commands."
@@ -282,10 +488,12 @@
 (defvar-keymap my/leader-search-map
   :doc "Search commands."
   :name "search"
-  "P" #'helm-projectile-rg
+  "P" #'helm-do-ag-project-root
+  "S" #'helm-do-ag-this-file
   "a" my/leader-search-ag-map
   "d" #'helm-do-ag
-  "p" #'helm-do-ag-project-root)
+  "p" #'helm-do-ag-project-root
+  "s" #'my/helm-search-current-file-empty)
 
 (defvar-keymap my/leader-git-map
   :doc "Git commands."
@@ -389,8 +597,17 @@
 (defvar-keymap my/leader-map
   :doc "Main leader map."
   :name "leader"
+  "1" #'winum-select-window-1
+  "2" #'winum-select-window-2
+  "3" #'winum-select-window-3
+  "4" #'winum-select-window-4
+  "5" #'winum-select-window-5
+  "6" #'winum-select-window-6
+  "7" #'winum-select-window-7
+  "8" #'winum-select-window-8
+  "9" #'winum-select-window-9
   "SPC" #'helm-M-x
-  "*" #'helm-projectile-rg
+  "*" #'helm-do-ag-project-root
   "'" #'shell-pop
   "/" #'helm-do-ag-project-root
   "S" my/leader-spelling-map
@@ -406,12 +623,28 @@
   "t" my/leader-toggle-map
   "w" my/leader-window-map)
 
+;; `defvar-keymap' intentionally preserves an existing value.  Set additions
+;; explicitly too, so evaluating init.el in a running Emacs updates the map.
+(keymap-set my/leader-map "*" #'helm-do-ag-project-root)
+(keymap-set my/leader-map "b h" #'my/home)
+(keymap-set my/leader-map "f s" #'save-buffer)
+(keymap-set my/leader-map "s s" #'my/helm-search-current-file-empty)
+(keymap-set my/leader-map "s S" #'helm-do-ag-this-file)
+
 ;;; Evil and key discovery
 
 (use-package evil
   :demand t
   :config
   (evil-mode 1)
+  (evil-set-initial-state 'my/home-mode 'motion)
+  (evil-define-key 'motion my/home-mode-map
+    (kbd "<backtab>") #'backward-button
+    (kbd "TAB") #'forward-button
+    (kbd "g") #'my/home-refresh
+    (kbd "q") #'bury-buffer)
+  (evil-define-key '(normal motion visual) 'global
+    (kbd "C-u") #'evil-scroll-up)
   (evil-define-key '(normal motion visual) 'global (kbd "SPC") my/leader-map)
   (evil-define-key '(insert emacs) 'global (kbd "M-m") my/leader-map))
 
@@ -455,6 +688,14 @@
 
 (winner-mode 1)
 
+(use-package winum
+  :demand t
+  :custom
+  (winum-auto-assign-0-to-minibuffer nil)
+  (winum-ignored-buffers '(" *which-key*"))
+  :config
+  (winum-mode 1))
+
 ;; Helm overrides these below with candidate navigation.  For other prompts,
 ;; C-j/C-k move through minibuffer history and Escape cancels immediately.
 (dolist (map (list minibuffer-local-map
@@ -478,7 +719,28 @@
          ("C-x C-f" . helm-find-files)
          ("C-x b" . helm-buffers-list))
   :custom
+  ;; Helm-AG results follow the selection: moving with C-j/C-k previews the
+  ;; match in the original window and keeps the current occurrence highlighted.
+  (helm-follow-mode-persistent t)
+  (helm-follow-input-idle-delay 0.1)
+  ;; Preserve every existing window.  Helm's default display path deletes
+  ;; other windows when auto-resize is active unless splitting inside is set.
+  (helm-split-window-inside-p t)
+  (helm-always-two-windows t)
+  (helm-full-frame nil)
+  (helm-default-display-buffer-functions '(display-buffer-in-side-window))
+  (helm-default-display-buffer-alist
+   '((inhibit-same-window . t)
+     (side . bottom)
+     (window-height . 0.4)))
   (helm-M-x-fuzzy-match t)
+  ;; SPC SPC shows recent commands first, in actual recency order, followed by
+  ;; every interactive Emacs command.  Do not hide commands merely because
+  ;; their `interactive' declaration names a different mode.
+  (helm-M-x-reverse-history nil)
+  (helm-M-x-history-transformer-sort nil)
+  (helm-M-x-exclude-unusable-commands-in-mode nil)
+  (helm-M-x-always-save-history t)
   (helm-buffers-fuzzy-matching t)
   (helm-recentf-fuzzy-match t)
   (helm-autoresize-max-height 40)
@@ -486,8 +748,14 @@
   (helm-grep-ag-command
    "rg --color=always --smart-case --no-heading --line-number %s -- %s %s")
   :config
+  (add-hook 'helm-before-initialize-hook #'my/helm-remember-origin-window)
   (keymap-set helm-map "C-j" #'helm-next-line)
   (keymap-set helm-map "C-k" #'helm-previous-line)
+  (keymap-set helm-map "C-u" #'helm-previous-page)
+  (evil-define-key 'normal helm-map (kbd "C-u") #'helm-previous-page)
+  (keymap-set helm-map "TAB" #'helm-execute-persistent-action)
+  (keymap-set helm-map "<tab>" #'helm-execute-persistent-action)
+  (keymap-set helm-map "C-z" #'helm-select-action)
   (keymap-set helm-map "<escape>" #'helm-keyboard-quit)
   (helm-autoresize-mode 1))
 
@@ -526,8 +794,14 @@
   :custom
   (helm-ag-base-command
    "rg --smart-case --no-heading --color=never --line-number")
+  (helm-ag-insert-at-point 'symbol)
   (helm-ag-success-exit-status '(0 1))
-  (helm-ag-use-grep-ignore-list t))
+  (helm-ag-use-grep-ignore-list t)
+  :config
+  (unless (advice-member-p #'my/helm-ag-omit-duplicate-current-file
+                           'helm-ag--construct-command)
+    (advice-add 'helm-ag--construct-command :around
+                #'my/helm-ag-omit-duplicate-current-file)))
 
 ;;; Magit, compilation, Dired, and terminal
 
