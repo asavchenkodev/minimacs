@@ -135,6 +135,7 @@
     clang-format
     company
     dashboard
+    doom-modeline
     drag-stuff
     evil
     evil-collection
@@ -227,6 +228,42 @@
   :config
   (load-theme 'planet t))
 
+;; A compact mode line with the useful context kept visible and minor-mode
+;; noise removed.  It reuses the Nerd Icons font already installed for Dired
+;; and Dashboard, but remains readable in a terminal without it.
+(use-package doom-modeline
+  :demand t
+  :init
+  (setq doom-modeline-height 26
+        doom-modeline-bar-width 3
+        doom-modeline-hud nil
+        doom-modeline-window-width-limit 50
+        doom-modeline-buffer-file-name-style 'file-name
+        doom-modeline-buffer-name t
+        doom-modeline-highlight-modified-buffer-name t
+        doom-modeline-icon t
+        doom-modeline-major-mode-icon t
+        doom-modeline-major-mode-color-icon t
+        doom-modeline-buffer-state-icon t
+        doom-modeline-buffer-modification-icon t
+        doom-modeline-unicode-fallback t
+        doom-modeline-minor-modes nil
+        doom-modeline-selection-info t
+        doom-modeline-buffer-encoding nil
+        doom-modeline-indent-info nil
+        doom-modeline-check nil
+        doom-modeline-project-name t
+        doom-modeline-workspace-name nil
+        doom-modeline-persp-name nil
+        doom-modeline-lsp nil
+        doom-modeline-env-version nil
+        doom-modeline-modal t
+        doom-modeline-modal-icon t
+        doom-modeline-modal-modern-icon t
+        doom-modeline-vcs-max-length 18)
+  :config
+  (doom-modeline-mode 1))
+
 ;;; Editing defaults
 
 (setq-default indent-tabs-mode nil
@@ -238,6 +275,7 @@
       compilation-scroll-output t
       compilation-skip-threshold 2
       dired-listing-switches "-alh"
+      dired-dwim-target t
       dired-use-ls-dired nil
       dired-kill-when-opening-new-dired-buffer t)
 
@@ -815,6 +853,8 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   :demand t
   :custom
   (winum-auto-assign-0-to-minibuffer nil)
+  ;; Doom Modeline renders the number; Winum only assigns it.
+  (winum-auto-setup-mode-line nil)
   (winum-ignored-buffers '(" *which-key*"))
   :config
   (winum-mode 1))
