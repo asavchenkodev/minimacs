@@ -743,7 +743,7 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   "7" #'winum-select-window-7
   "8" #'winum-select-window-8
   "9" #'winum-select-window-9
-  "SPC" #'helm-M-x
+  "e" #'helm-M-x
   "*" #'helm-do-ag-project-root
   "'" #'shell-pop
   "/" #'helm-do-ag-project-root
@@ -765,6 +765,8 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
 
 ;; `defvar-keymap' intentionally preserves an existing value.  Set additions
 ;; explicitly too, so evaluating init.el in a running Emacs updates the map.
+(keymap-unset my/leader-map "SPC")
+(keymap-set my/leader-map "e" #'helm-M-x)
 (keymap-set my/leader-map "*" #'helm-do-ag-project-root)
 (keymap-set my/leader-map "b h" #'dashboard-open)
 (keymap-set my/leader-map "f s" #'save-buffer)
@@ -837,6 +839,7 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
     "b" "buffers"
     "c" "compile"
     "d" "custom"
+    "e" "commands"
     "f" "files"
     "g" "git"
     "h" "help"
@@ -902,7 +905,7 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
      (side . bottom)
      (window-height . 0.4)))
   (helm-M-x-fuzzy-match t)
-  ;; SPC SPC shows recent commands first, in actual recency order, followed by
+  ;; SPC e shows recent commands first, in actual recency order, followed by
   ;; every interactive Emacs command.  Do not hide commands merely because
   ;; their `interactive' declaration names a different mode.
   (helm-M-x-reverse-history nil)
@@ -954,6 +957,17 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
         (expand-file-name "projectile-frecency.eld" my/var-directory)
         projectile-known-projects-file
         (expand-file-name "projectile-bookmarks.eld" my/var-directory)))
+
+(use-package daily-worklog
+  :ensure nil
+  :load-path "lisp"
+  :demand t
+  :custom
+  (daily-worklog-directory
+   (expand-file-name "daily-worklog/" my/var-directory))
+  (daily-worklog-save-interval 900)
+  :config
+  (daily-worklog-mode 1))
 
 (use-package helm-projectile
   :defer t
@@ -1016,7 +1030,7 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
         dashboard-display-icons-p (my/nerd-icons-font-available-p)
         dashboard-set-init-info t
         dashboard-footer-messages
-        '("SPC SPC commands  •  SPC p p projects  •  SPC f f files"))
+        '("SPC e commands  •  SPC p p projects  •  SPC f f files"))
   :config
   (require 'projectile)
   (projectile-mode 1)
