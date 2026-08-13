@@ -52,6 +52,7 @@
 (defvar helm-ag--default-target)
 (defvar helm-input)
 (defvar evil-iedit-state-map)
+(defvar ispell-program-name nil)
 (defvar xref--xref-buffer-mode-map)
 (defvar org-persist--disable-when-emacs-Q)
 (defvar projectile-known-projects)
@@ -190,15 +191,75 @@
 (require 'use-package)
 (setq use-package-always-ensure nil)
 
-;;; macOS environment and basic UI
+;;; Platform environment and basic UI
 
-(let ((homebrew-bin "/opt/homebrew/bin"))
-  (add-to-list 'exec-path homebrew-bin)
-  (unless (member homebrew-bin (parse-colon-path (getenv "PATH")))
-    (setenv "PATH" (concat homebrew-bin path-separator (getenv "PATH")))))
+(defun my/prepend-executable-directory (directory)
+  "Prepend existing DIRECTORY to both `exec-path' and PATH."
+  (when (file-directory-p directory)
+    (add-to-list 'exec-path directory)
+    (let ((path (or (getenv "PATH") "")))
+      (unless (member directory (split-string path path-separator t))
+        (setenv "PATH" (if (string-empty-p path)
+                           directory
+                         (concat directory path-separator path)))))))
+
+;; GUI applications do not always inherit the login shell's complete PATH.
+;; Add only directories belonging to the current operating system.
+(pcase system-type
+  ('darwin
+   (my/prepend-executable-directory "/usr/local/bin")
+   (my/prepend-executable-directory "/opt/homebrew/bin"))
+  ('gnu/linux
+   (my/prepend-executable-directory "/usr/bin")
+   (my/prepend-executable-directory "/usr/local/bin")))
+
+(defun my/find-executable (program &rest fallback-files)
+  "Find PROGRAM on PATH or in executable FALLBACK-FILES."
+  (or (executable-find program)
+      (seq-find #'file-executable-p (delq nil fallback-files))))
+
+(defun my/etags-executable ()
+  "Return the platform-appropriate GNU Etags executable, if available."
+  (apply #'my/find-executable
+         "etags"
+         (pcase system-type
+           ('darwin '("/opt/homebrew/bin/etags"))
+           ('gnu/linux '("/usr/local/bin/etags" "/usr/bin/etags"))
+           (_ nil))))
+
+(defun my/spell-checker-executable ()
+  "Return the preferred spelling executable for this platform."
+  (pcase system-type
+    ('darwin
+     (or (my/find-executable "hunspell" "/opt/homebrew/bin/hunspell")
+         (my/find-executable "aspell")))
+    ('gnu/linux
+     (or (my/find-executable "aspell" "/usr/bin/aspell")
+         (my/find-executable "hunspell")))
+    (_
+     (or (my/find-executable "aspell")
+         (my/find-executable "hunspell")
+         (my/find-executable "ispell")))))
+
+(defun my/python-executable ()
+  "Return the preferred Python executable for this platform."
+  (or (my/find-executable
+       "python3"
+       (pcase system-type
+         ('darwin "/opt/homebrew/bin/python3")
+         ('gnu/linux "/usr/bin/python3")))
+      (my/find-executable "python")))
+
+(defvar my/python-program nil
+  "Python executable shared by Python mode and Org Babel.")
+
+(setq my/python-program
+      (or (my/python-executable)
+          "python3"))
 
 (add-to-list 'default-frame-alist '(fullscreen . fullboth))
-(add-to-list 'default-frame-alist '(font . "Menlo-12"))
+(when (eq system-type 'darwin)
+  (add-to-list 'default-frame-alist '(font . "Menlo-12")))
 (add-to-list 'initial-frame-alist '(fullscreen . fullboth))
 
 (when (fboundp 'tool-bar-mode)
@@ -488,18 +549,23 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   "Discard and immediately rebuild automatic ETAGS for this project."
   (interactive)
   (require 'project)
-  (require 'etags-regen)
-  (let* ((project (project-current t))
-         (root (project-root project))
-         (tags-file (my/project-tags-file root)))
-    (etags-regen--tags-cleanup)
-    (when-let ((buffer (get-file-buffer tags-file)))
-      (kill-buffer buffer))
-    (when (file-exists-p tags-file)
-      (delete-file tags-file))
-    (tags-reset-tags-tables)
-    (etags-regen--tags-generate project)
-    (message "Rebuilt tags for %s" (abbreviate-file-name root))))
+  (unless (require 'etags-regen nil t)
+    (user-error "This Emacs installation does not provide etags-regen"))
+  (let ((program (my/etags-executable)))
+    (unless program
+      (user-error "Cannot find etags on PATH"))
+    (setq etags-regen-program program)
+    (let* ((project (project-current t))
+           (root (project-root project))
+           (tags-file (my/project-tags-file root)))
+      (etags-regen--tags-cleanup)
+      (when-let ((buffer (get-file-buffer tags-file)))
+        (kill-buffer buffer))
+      (when (file-exists-p tags-file)
+        (delete-file tags-file))
+      (tags-reset-tags-tables)
+      (etags-regen--tags-generate project)
+      (message "Rebuilt tags for %s" (abbreviate-file-name root)))))
 
 (defun my/disable-flymake ()
   "Keep automatic code diagnostics disabled in this profile."
@@ -1066,14 +1132,19 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
 
 ;;; Automatic project tags and xref
 
-(setq etags-regen-program "/opt/homebrew/bin/etags"
+(setq etags-regen-program (or (my/etags-executable) "etags")
       etags-regen-tags-file #'my/project-tags-file
       etags-regen-ignores
       '("build" "build-*" "cmake-build-*" "dist" "target"
         "node_modules" ".cache" ".venv" "venv" "vendor" "third_party"))
 
-(require 'etags-regen)
-(etags-regen-mode 1)
+(cond
+ ((not (require 'etags-regen nil t))
+  (message "Automatic project tags disabled: etags-regen is unavailable"))
+ ((not (my/etags-executable))
+  (message "Automatic project tags disabled: cannot find etags on PATH"))
+ (t
+  (etags-regen-mode 1)))
 
 (with-eval-after-load 'xref
   (keymap-set xref--xref-buffer-mode-map "C-h" #'xref-go-back)
@@ -1175,7 +1246,8 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   :custom
   (clang-format-executable
    (or (executable-find "clang-format")
-       (and (file-executable-p
+       (and (eq system-type 'darwin)
+            (file-executable-p
              "/Library/Developer/CommandLineTools/usr/bin/clang-format")
             "/Library/Developer/CommandLineTools/usr/bin/clang-format")
        "clang-format"))
@@ -1217,7 +1289,7 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   (keymap-set company-active-map "TAB" #'company-complete-common-or-cycle)
   (keymap-set company-active-map "RET" #'company-complete-selection))
 
-(setq python-shell-interpreter "/opt/homebrew/bin/python3"
+(setq python-shell-interpreter my/python-program
       python-indent-offset 4)
 
 (defun my/python-mode-settings ()
@@ -1229,14 +1301,31 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
 
 ;;; Spelling
 
-(setq ispell-program-name "/opt/homebrew/bin/hunspell"
-      ispell-dictionary "en_US"
-      ispell-personal-dictionary (expand-file-name "personal-dictionary" my/var-directory))
-(setenv "DICPATH" (expand-file-name "~/Library/Spelling"))
+(when-let ((checker (my/spell-checker-executable)))
+  (setq ispell-program-name checker))
 
-(add-hook 'text-mode-hook #'flyspell-mode)
-(add-hook 'org-mode-hook #'flyspell-mode)
-(add-hook 'prog-mode-hook #'flyspell-prog-mode)
+(setq ispell-dictionary "en_US"
+      ispell-personal-dictionary (expand-file-name "personal-dictionary" my/var-directory))
+
+(when (and (eq system-type 'darwin)
+           (string-match-p "hunspell\\'" (or ispell-program-name "")))
+  (setenv "DICPATH" (expand-file-name "~/Library/Spelling")))
+
+(defun my/enable-flyspell ()
+  "Enable Flyspell when a supported spell checker is installed."
+  (when-let ((checker (my/spell-checker-executable)))
+    (setq ispell-program-name checker)
+    (flyspell-mode 1)))
+
+(defun my/enable-flyspell-prog-mode ()
+  "Enable Flyspell for comments and strings when a checker is installed."
+  (when-let ((checker (my/spell-checker-executable)))
+    (setq ispell-program-name checker)
+    (flyspell-prog-mode)))
+
+(add-hook 'text-mode-hook #'my/enable-flyspell)
+(add-hook 'org-mode-hook #'my/enable-flyspell)
+(add-hook 'prog-mode-hook #'my/enable-flyspell-prog-mode)
 
 (use-package flyspell-correct
   :defer t
@@ -1283,7 +1372,7 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
         org-ellipsis "…"
         org-fontify-done-headline nil
         org-fontify-todo-headline nil
-        org-babel-python-command "/opt/homebrew/bin/python3")
+        org-babel-python-command my/python-program)
   :config
   (require 'org-tempo)
   (org-babel-do-load-languages
