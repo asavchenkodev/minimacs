@@ -43,10 +43,12 @@
 (declare-function helm-end-of-source-p "helm-core")
 (declare-function helm-keyboard-quit "helm")
 (declare-function helm-next-line "helm")
+(declare-function helm-next-page "helm")
 (declare-function helm-next-source "helm")
 (declare-function helm-previous-page "helm")
 (declare-function helm-previous-line "helm")
 (declare-function helm-previous-source "helm")
+(declare-function helm-resume "helm")
 (declare-function helm-run-after-exit "helm")
 (declare-function helm-select-action "helm")
 (declare-function helm-set-attr "helm-core")
@@ -66,6 +68,7 @@
 (defvar helm-input)
 (defvar helm-move-to-line-cycle-in-source)
 (defvar helm-source-do-ag)
+(defvar helm-white-buffer-regexp-list)
 (defvar evil-iedit-state-map)
 (defvar ispell-program-name nil)
 (defvar xref--xref-buffer-mode-map)
@@ -315,8 +318,8 @@
   (load-theme 'planet t))
 
 ;; A compact mode line with the useful context kept visible and minor-mode
-;; noise removed.  It reuses the Nerd Icons font already installed for Dired
-;; and Dashboard, but remains readable in a terminal without it.
+;; noise removed.  Keep this text-first so it renders consistently on macOS,
+;; Ubuntu, and terminals without depending on Nerd Fonts.
 (use-package doom-modeline
   :demand t
   :init
@@ -327,12 +330,13 @@
         doom-modeline-buffer-file-name-style 'file-name
         doom-modeline-buffer-name t
         doom-modeline-highlight-modified-buffer-name t
-        doom-modeline-icon t
-        doom-modeline-major-mode-icon t
-        doom-modeline-major-mode-color-icon t
-        doom-modeline-buffer-state-icon t
-        doom-modeline-buffer-modification-icon t
-        doom-modeline-unicode-fallback t
+        doom-modeline-icon nil
+        doom-modeline-major-mode-icon nil
+        doom-modeline-major-mode-color-icon nil
+        doom-modeline-buffer-state-icon nil
+        doom-modeline-buffer-modification-icon nil
+        doom-modeline-unicode-number nil
+        doom-modeline-unicode-fallback nil
         doom-modeline-minor-modes nil
         doom-modeline-selection-info t
         doom-modeline-buffer-encoding nil
@@ -343,11 +347,15 @@
         doom-modeline-persp-name nil
         doom-modeline-lsp nil
         doom-modeline-env-version nil
-        doom-modeline-modal t
-        doom-modeline-modal-icon t
-        doom-modeline-modal-modern-icon t
+        doom-modeline-modal nil
+        doom-modeline-modal-icon nil
+        doom-modeline-modal-modern-icon nil
         doom-modeline-vcs-max-length 18)
   :config
+  ;; The matches segment also renders the red record-dot/triangle while a
+  ;; keyboard macro is active.  The modeline is intentionally minimal, so do
+  ;; not show that transient icon group either.
+  (doom-modeline-remove-segment 'matches)
   (doom-modeline-mode 1))
 
 ;;; Editing defaults
@@ -402,6 +410,37 @@
   "Search the current project after prompting for extra RG options."
   (interactive)
   (my/helm-search-with-rg-options #'helm-do-ag-project-root ""))
+
+(defvar my/last-helm-ag-results-buffer nil
+  "Most recently created or updated saved Helm-AG results buffer.")
+
+(defun my/remember-helm-ag-results-buffer (&rest _)
+  "Remember the current saved Helm-AG results buffer."
+  (setq my/last-helm-ag-results-buffer (current-buffer)))
+
+(defun my/latest-helm-ag-results-buffer ()
+  "Return the most recent live saved Helm-AG results buffer."
+  (or (and (buffer-live-p my/last-helm-ag-results-buffer)
+           my/last-helm-ag-results-buffer)
+      (get-buffer "*helm ag results*")
+      (seq-find
+       (lambda (buffer)
+         (with-current-buffer buffer
+           (derived-mode-p 'helm-ag-mode)))
+       (buffer-list))))
+
+(defun my/resume-last-search-buffer ()
+  "Show the last saved Helm-AG results, or resume the last live search."
+  (interactive)
+  (let ((results (my/latest-helm-ag-results-buffer)))
+    (cond
+     (results
+      (setq my/last-helm-ag-results-buffer results)
+      (switch-to-buffer-other-window results))
+     ((get-buffer "*helm-ag*")
+      (helm-resume "*helm-ag*"))
+     (t
+      (user-error "No previous search buffer found")))))
 
 (defun my/helm--next-candidate-across-sources ()
   "Move one Helm candidate forward, entering the next source at its end."
@@ -812,6 +851,7 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   "a" my/leader-search-ag-map
   "d" #'helm-do-ag
   "e" #'evil-iedit-state/iedit-mode
+  "l" #'my/resume-last-search-buffer
   "o" my/leader-search-options-map
   "p" #'helm-do-ag-project-root
   "s" #'my/helm-search-current-file-empty)
@@ -1008,6 +1048,7 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
 (keymap-set my/leader-map "j d" #'dired-jump)
 (keymap-set my/leader-map "j D" #'dired-jump-other-window)
 (keymap-set my/leader-map "s e" #'evil-iedit-state/iedit-mode)
+(keymap-set my/leader-map "s l" #'my/resume-last-search-buffer)
 (keymap-set my/leader-map "s o" my/leader-search-options-map)
 (keymap-set my/leader-map "s s" #'my/helm-search-current-file-empty)
 (keymap-set my/leader-map "s S" #'helm-do-ag-this-file)
@@ -1085,6 +1126,7 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
     "w" "windows")
   (which-key-add-keymap-based-replacements
     my/leader-search-map
+    "l" "last search"
     "o" "rg options"))
 
 (winner-mode 1)
@@ -1158,15 +1200,27 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
    "rg --color=always --smart-case --no-heading --line-number %s -- %s %s")
   :config
   (add-hook 'helm-before-initialize-hook #'my/helm-remember-origin-window)
+  ;; Helm normally hides all buffers beginning with "*helm".  Saved F3
+  ;; search results are real, persistent result buffers and should remain
+  ;; reachable from the ordinary buffer list.
+  (add-to-list 'helm-white-buffer-regexp-list
+               "\\`\\*helm ag results")
+  ;; Use the ordinary arrow keys to edit Helm's input pattern.  Candidate
+  ;; movement remains on C-j/C-k; source movement remains available through
+  ;; Helm's existing C-o and bracket bindings.
+  (keymap-set helm-map "<left>" #'backward-char)
+  (keymap-set helm-map "<right>" #'forward-char)
   (keymap-set helm-map "C-j" #'my/helm-next-candidate-across-sources)
   (keymap-set helm-map "C-k" #'my/helm-previous-candidate-across-sources)
   (evil-define-key '(normal insert motion) helm-map
     (kbd "C-j") #'my/helm-next-candidate-across-sources
     (kbd "C-k") #'my/helm-previous-candidate-across-sources
+    (kbd "C-u") #'helm-previous-page
+    (kbd "C-d") #'helm-next-page
     (kbd "TAB") #'helm-execute-persistent-action
     (kbd "<tab>") #'helm-execute-persistent-action)
   (keymap-set helm-map "C-u" #'helm-previous-page)
-  (evil-define-key 'normal helm-map (kbd "C-u") #'helm-previous-page)
+  (keymap-set helm-map "C-d" #'helm-next-page)
   (keymap-set helm-map "TAB" #'helm-execute-persistent-action)
   (keymap-set helm-map "<tab>" #'helm-execute-persistent-action)
   (keymap-set helm-map "C-z" #'helm-select-action)
@@ -1304,9 +1358,19 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
     (advice-add 'helm-ag--do-ag-set-source :after
                 #'my/helm-ag-disable-automatic-preview))
   (unless (advice-member-p #'my/helm-ag-parse-rg-options
-                           'helm-ag--parse-options-and-query)
+                         'helm-ag--parse-options-and-query)
     (advice-add 'helm-ag--parse-options-and-query :around
                 #'my/helm-ag-parse-rg-options))
+  (unless (advice-member-p #'my/remember-helm-ag-results-buffer
+                           'helm-ag--put-result-in-save-buffer)
+    (advice-add 'helm-ag--put-result-in-save-buffer :after
+                #'my/remember-helm-ag-results-buffer))
+  ;; Helm-AG otherwise replaces the base Helm arrow bindings with
+  ;; previous/next-file commands, making its query and RG options awkward to
+  ;; edit.  C-j/C-k already handle result navigation.
+  (dolist (map (list helm-ag-map helm-do-ag-map))
+    (keymap-set map "<left>" #'backward-char)
+    (keymap-set map "<right>" #'forward-char))
   (keymap-set helm-ag-map "C-h" #'my/helm-ag-up-one-level)
   (keymap-set helm-ag-map "C-l" #'my/helm-ag-down-one-level)
   (keymap-set helm-do-ag-map "C-h" #'my/helm-do-ag-up-one-level)
