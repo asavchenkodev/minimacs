@@ -1680,6 +1680,10 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   (my/bind-leader-in-keymap magit-mode-map))
 
 (with-eval-after-load 'compile
+  ;; Commands such as Just and CMake may emit terminal color/bold sequences.
+  ;; Translate them into Emacs faces instead of displaying raw ESC[1m text.
+  (require 'ansi-color)
+  (add-hook 'compilation-filter-hook #'ansi-color-compilation-filter)
   (my/bind-leader-in-keymap compilation-mode-map))
 
 (with-eval-after-load 'dired
