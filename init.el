@@ -32,7 +32,10 @@
 (declare-function helm-find-files-1 "helm-files")
 (declare-function helm-find-files-down-last-level "helm-files")
 (declare-function helm-find-files-up-one-level "helm-files")
+(declare-function helm-do-ag "helm-ag")
+(declare-function helm-do-ag-project-root "helm-ag")
 (declare-function helm-do-ag-this-file "helm-ag")
+(declare-function helm-ag-mode-jump-other-window "helm-ag")
 (declare-function helm-ag--do-ag-up-one-level "helm-ag")
 (declare-function helm-ag--up-one-level "helm-ag")
 (declare-function helm-execute-persistent-action "helm")
@@ -46,6 +49,7 @@
 (declare-function helm-previous-source "helm")
 (declare-function helm-run-after-exit "helm")
 (declare-function helm-select-action "helm")
+(declare-function helm-set-attr "helm-core")
 (declare-function helm-set-local-variable "helm")
 (declare-function helm-window "helm-core")
 (declare-function kill-compilation "compile")
@@ -55,8 +59,13 @@
 (declare-function tags-reset-tags-tables "etags")
 
 (defvar helm-ag--default-target)
+(defvar helm-ag--search-this-file-p)
+(defvar helm-ag-always-set-extra-option)
+(defvar helm-ag-source)
+(defvar helm-buffer)
 (defvar helm-input)
 (defvar helm-move-to-line-cycle-in-source)
+(defvar helm-source-do-ag)
 (defvar evil-iedit-state-map)
 (defvar ispell-program-name nil)
 (defvar xref--xref-buffer-mode-map)
@@ -69,6 +78,16 @@
 (defconst my/backup-directory (expand-file-name "backups/" my/var-directory))
 (defconst my/autosave-directory (expand-file-name "auto-save/" my/var-directory))
 (defconst my/tags-directory (expand-file-name "tags/" my/var-directory))
+
+(defconst my/helm-ag-rg-options-with-values
+  '("--after-context" "--before-context" "--context"
+    "--context-separator" "--dfa-size-limit" "--encoding" "--engine"
+    "--glob" "--iglob" "--ignore-file" "--max-columns" "--max-count"
+    "--max-depth" "--max-filesize" "--path-separator" "--pre"
+    "--pre-glob" "--regexp" "--replace" "--sort" "--sortr" "--threads"
+    "--type" "--type-add" "--type-clear" "--type-not"
+    "-A" "-B" "-C" "-E" "-f" "-g" "-M" "-m" "-r" "-t" "-T" "-e")
+  "Ripgrep options whose following token is an option value, not query text.")
 
 (dolist (directory (list my/var-directory
                          my/backup-directory
@@ -361,6 +380,29 @@
   (interactive)
   (helm-do-ag-this-file ""))
 
+(defun my/helm-search-with-rg-options (command &rest arguments)
+  "Call Helm-AG COMMAND with ARGUMENTS after prompting for RG options."
+  (let ((helm-ag-always-set-extra-option t)
+        ;; Prevent Helm-AG's separate prefix-driven extension prompt.
+        (current-prefix-arg nil))
+    (apply command arguments)))
+
+(defun my/helm-search-current-file-with-rg-options ()
+  "Search the current file after prompting for extra RG options."
+  (interactive)
+  (my/helm-search-with-rg-options #'helm-do-ag-this-file ""))
+
+(defun my/helm-search-current-directory-with-rg-options ()
+  "Search the current directory after prompting for extra RG options."
+  (interactive)
+  (my/helm-search-with-rg-options
+   #'helm-do-ag (file-name-as-directory default-directory) nil ""))
+
+(defun my/helm-search-project-with-rg-options ()
+  "Search the current project after prompting for extra RG options."
+  (interactive)
+  (my/helm-search-with-rg-options #'helm-do-ag-project-root ""))
+
 (defun my/helm--next-candidate-across-sources ()
   "Move one Helm candidate forward, entering the next source at its end."
   (if (with-selected-window (helm-window)
@@ -395,6 +437,54 @@
   (interactive "p")
   (my/helm-next-candidate-across-sources (- (or count 1))))
 
+(defun my/helm-ag-result-at-point-p ()
+  "Return non-nil when point is on a saved Helm-AG result."
+  (let ((line (buffer-substring-no-properties
+               (line-beginning-position) (line-end-position))))
+    (if helm-ag--search-this-file-p
+        (string-match-p "\\`[0-9]+:" line)
+      (and (helm-grep-split-line line) t))))
+
+(defun my/helm-ag-results--seek (direction)
+  "Move to the next saved Helm-AG result in DIRECTION."
+  (let ((origin (point))
+        found)
+    (while (and (zerop (forward-line direction))
+                (not (setq found (my/helm-ag-result-at-point-p)))))
+    (unless found
+      (goto-char origin)
+      (user-error "No %s Helm-AG result"
+                  (if (> direction 0) "next" "previous")))))
+
+(defun my/helm-ag-results-preview ()
+  "Preview the saved Helm-AG result at point without leaving its list."
+  (interactive)
+  (unless (my/helm-ag-result-at-point-p)
+    (user-error "Point is not on a Helm-AG result"))
+  (save-selected-window
+    (helm-ag-mode-jump-other-window)))
+
+(defun my/helm-ag-results-next (&optional count)
+  "Move COUNT saved Helm-AG results forward and preview the destination."
+  (interactive "p")
+  (setq count (or count 1))
+  (let ((direction (if (< count 0) -1 1)))
+    (dotimes (_ (abs count))
+      (my/helm-ag-results--seek direction)))
+  (my/helm-ag-results-preview))
+
+(defun my/helm-ag-results-previous (&optional count)
+  "Move COUNT saved Helm-AG results backward and preview the destination."
+  (interactive "p")
+  (my/helm-ag-results-next (- (or count 1))))
+
+(defun my/helm-ag-results-open ()
+  "Open the saved Helm-AG result at point in its source window."
+  (interactive)
+  (unless (my/helm-ag-result-at-point-p)
+    (user-error "Point is not on a Helm-AG result"))
+  (helm-ag-mode-jump-other-window))
+
 (defun my/helm-ag-omit-duplicate-current-file (original this-file)
   "Call ORIGINAL without passing THIS-FILE to ripgrep twice.
 The pinned helm-ag fork adds a current-file target both as THIS-FILE and via
@@ -410,7 +500,36 @@ expects only `line:text', causing every preview to jump to line zero."
 (defun my/helm-remember-origin-window ()
   "Keep Helm persistent actions in the exact window that launched Helm."
   (helm-set-local-variable 'helm-persistent-action-display-window
-                           (selected-window)))
+                           (selected-window))
+  ;; The generic persistent-action hint consumes a full row and repeats a
+  ;; binding the user already knows.  Hide it only in live Helm-AG searches.
+  (when (equal helm-buffer "*helm-ag*")
+    (helm-set-local-variable 'helm-display-header-line nil
+                             'header-line-format nil)))
+
+(defun my/helm-ag-disable-automatic-preview (&rest _)
+  "Disable follow mode in the most recently constructed Helm-AG source."
+  (when (bound-and-true-p helm-source-do-ag)
+    (helm-set-attr 'follow nil helm-source-do-ag)))
+
+(defun my/helm-ag-normalize-rg-option-values (input)
+  "Normalize spaced value-taking RG options in Helm-AG INPUT.
+
+Helm-AG's parser understands `--type=c' but treats the value in `--type c'
+as part of the search pattern.  Ripgrep accepts both forms, so convert the
+latter before Helm-AG separates command options from query text."
+  (let ((normalized input))
+    (dolist (option my/helm-ag-rg-options-with-values normalized)
+      (setq normalized
+            (replace-regexp-in-string
+             (concat "\\(^\\|[[:space:]]+\\)"
+                     "\\(" (regexp-quote option) "\\)"
+                     "[[:space:]]+\\([^[:space:]]+\\)")
+             "\\1\\2=\\3" normalized nil nil)))))
+
+(defun my/helm-ag-parse-rg-options (original input)
+  "Call Helm-AG parser ORIGINAL with normalized RG options from INPUT."
+  (funcall original (my/helm-ag-normalize-rg-option-values input)))
 
 (defun my/helm-find-recursively ()
   "Find files recursively below a prompted directory with Helm."
@@ -678,6 +797,13 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   "d" #'helm-do-ag
   "p" #'helm-do-ag-project-root)
 
+(defvar-keymap my/leader-search-options-map
+  :doc "Helm-AG searches with extra Ripgrep options."
+  :name "rg options"
+  "d" #'my/helm-search-current-directory-with-rg-options
+  "p" #'my/helm-search-project-with-rg-options
+  "s" #'my/helm-search-current-file-with-rg-options)
+
 (defvar-keymap my/leader-search-map
   :doc "Search commands."
   :name "search"
@@ -686,6 +812,7 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   "a" my/leader-search-ag-map
   "d" #'helm-do-ag
   "e" #'evil-iedit-state/iedit-mode
+  "o" my/leader-search-options-map
   "p" #'helm-do-ag-project-root
   "s" #'my/helm-search-current-file-empty)
 
@@ -881,6 +1008,7 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
 (keymap-set my/leader-map "j d" #'dired-jump)
 (keymap-set my/leader-map "j D" #'dired-jump-other-window)
 (keymap-set my/leader-map "s e" #'evil-iedit-state/iedit-mode)
+(keymap-set my/leader-map "s o" my/leader-search-options-map)
 (keymap-set my/leader-map "s s" #'my/helm-search-current-file-empty)
 (keymap-set my/leader-map "s S" #'helm-do-ag-this-file)
 (keymap-set my/leader-map "v" #'er/expand-region)
@@ -954,7 +1082,10 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
     "p" "projects"
     "s" "search"
     "t" "toggles"
-    "w" "windows"))
+    "w" "windows")
+  (which-key-add-keymap-based-replacements
+    my/leader-search-map
+    "o" "rg options"))
 
 (winner-mode 1)
 
@@ -996,11 +1127,10 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
          ("C-x C-f" . helm-find-files)
          ("C-x b" . helm-buffers-list))
   :custom
-  ;; Helm-AG results follow the selection: moving with C-j/C-k previews the
-  ;; match in the original window and keeps the current occurrence highlighted.
-  ;; Spacemacs delegates this to Helm follow mode as well; keep only a 1 ms
-  ;; idle timer so rapid key repeats can coalesce before previewing.
-  (helm-follow-mode-persistent t)
+  ;; Keep movement and preview separate, as in the manual Helm workflow:
+  ;; C-j/C-k select a candidate and TAB explicitly previews it.
+  (helm-follow-mode-persistent nil)
+  ;; Used only if follow mode is toggled on manually for a Helm source.
   (helm-follow-input-idle-delay 0.001)
   ;; Preserve every existing window.  Helm's default display path deletes
   ;; other windows when auto-resize is active unless splitting inside is set.
@@ -1032,7 +1162,9 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   (keymap-set helm-map "C-k" #'my/helm-previous-candidate-across-sources)
   (evil-define-key '(normal insert motion) helm-map
     (kbd "C-j") #'my/helm-next-candidate-across-sources
-    (kbd "C-k") #'my/helm-previous-candidate-across-sources)
+    (kbd "C-k") #'my/helm-previous-candidate-across-sources
+    (kbd "TAB") #'helm-execute-persistent-action
+    (kbd "<tab>") #'helm-execute-persistent-action)
   (keymap-set helm-map "C-u" #'helm-previous-page)
   (evil-define-key 'normal helm-map (kbd "C-u") #'helm-previous-page)
   (keymap-set helm-map "TAB" #'helm-execute-persistent-action)
@@ -1163,11 +1295,37 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   (helm-ag-success-exit-status '(0 1))
   (helm-ag-use-grep-ignore-list t)
   :config
+  ;; `helm-ag-source' may have been created with follow mode enabled before a
+  ;; live init.el reload.  Reset both the static and future async sources.
+  (helm-set-attr 'follow nil helm-ag-source)
+  (my/helm-ag-disable-automatic-preview)
+  (unless (advice-member-p #'my/helm-ag-disable-automatic-preview
+                           'helm-ag--do-ag-set-source)
+    (advice-add 'helm-ag--do-ag-set-source :after
+                #'my/helm-ag-disable-automatic-preview))
+  (unless (advice-member-p #'my/helm-ag-parse-rg-options
+                           'helm-ag--parse-options-and-query)
+    (advice-add 'helm-ag--parse-options-and-query :around
+                #'my/helm-ag-parse-rg-options))
   (keymap-set helm-ag-map "C-h" #'my/helm-ag-up-one-level)
   (keymap-set helm-ag-map "C-l" #'my/helm-ag-down-one-level)
   (keymap-set helm-do-ag-map "C-h" #'my/helm-do-ag-up-one-level)
   (keymap-set helm-do-ag-map "C-l" #'my/helm-ag-down-one-level)
   (my/bind-leader-in-keymap helm-ag-edit-map)
+  ;; Spacemacs makes saved Helm-AG buffers next-error capable.  These local
+  ;; bindings provide the same preview workflow directly from the result list.
+  (keymap-set helm-ag-mode-map "C-j" #'my/helm-ag-results-next)
+  (keymap-set helm-ag-mode-map "C-k" #'my/helm-ag-results-previous)
+  (keymap-set helm-ag-mode-map "RET" #'my/helm-ag-results-open)
+  (keymap-set helm-ag-mode-map "<return>" #'my/helm-ag-results-open)
+  (keymap-set helm-ag-mode-map "q" #'quit-window)
+  (evil-set-initial-state 'helm-ag-mode 'motion)
+  (evil-define-key* '(normal motion) helm-ag-mode-map
+    (kbd "C-j") #'my/helm-ag-results-next
+    (kbd "C-k") #'my/helm-ag-results-previous
+    (kbd "RET") #'my/helm-ag-results-open
+    (kbd "q") #'quit-window)
+  (my/bind-leader-in-keymap helm-ag-mode-map)
   (unless (advice-member-p #'my/helm-ag-reset-directory-stack 'helm-do-ag)
     (advice-add 'helm-do-ag :around #'my/helm-ag-reset-directory-stack))
   (unless (advice-member-p #'my/helm-ag-omit-duplicate-current-file
@@ -1192,9 +1350,19 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   (etags-regen-mode 1)))
 
 (with-eval-after-load 'xref
+  ;; Like Spacemacs' evilified Xref buffer, keep navigation in the results
+  ;; window.  Xref's line commands preview in the source window themselves.
+  (keymap-set xref--xref-buffer-mode-map "C-j" #'xref-next-line)
+  (keymap-set xref--xref-buffer-mode-map "C-k" #'xref-prev-line)
+  (keymap-set xref--xref-buffer-mode-map "RET" #'xref-goto-xref)
+  (keymap-set xref--xref-buffer-mode-map "<return>" #'xref-goto-xref)
   (keymap-set xref--xref-buffer-mode-map "C-h" #'xref-go-back)
   (keymap-set xref--xref-buffer-mode-map "C-l" #'xref-go-forward)
   (evil-set-initial-state 'xref--xref-buffer-mode 'motion)
+  (evil-define-key* '(normal motion) xref--xref-buffer-mode-map
+    (kbd "C-j") #'xref-next-line
+    (kbd "C-k") #'xref-prev-line
+    (kbd "RET") #'xref-goto-xref)
   (my/bind-leader-in-keymap xref--xref-buffer-mode-map))
 
 ;;; Magit, compilation, Dired, and terminal
