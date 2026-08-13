@@ -7,6 +7,7 @@
 ;;; Profile-local state
 
 (require 'package)
+(require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
 
@@ -54,6 +55,12 @@
 (declare-function helm-set-attr "helm-core")
 (declare-function helm-set-local-variable "helm")
 (declare-function helm-window "helm-core")
+(declare-function justl--parse "justl")
+(declare-function justl--pop-to-buffer "justl")
+(declare-function justl--recipe-desc "justl")
+(declare-function justl--recipe-name "justl")
+(declare-function justl-mode "justl")
+(declare-function make-recipe "justl" (&rest arguments))
 (declare-function kill-compilation "compile")
 (declare-function projectile-switch-project-by-name "projectile")
 (declare-function projectile-save-known-projects "projectile")
@@ -70,7 +77,10 @@
 (defvar helm-source-do-ag)
 (defvar helm-white-buffer-regexp-list)
 (defvar evil-iedit-state-map)
+(defvar justl--last-justl-buffer)
 (defvar justl-compile-mode-map)
+(defvar justl-include-private-recipes)
+(defvar justl-justfile)
 (defvar justl-mode-map)
 (defvar ispell-program-name nil)
 (defvar xref--xref-buffer-mode-map)
@@ -428,13 +438,109 @@ from the directory containing that file."
     (condition-case error-data
         (progn
           (require 'justl)
-          (justl justfile))
+          (my/justl-open justfile))
       (error
        (message "Just recipe chooser failed (%s); running default recipe"
                 (error-message-string error-data))
        (let ((default-directory (file-name-directory justfile))
              (compilation-buffer-name-function (lambda (_) "*just*")))
          (compile "just"))))))
+
+(defun my/justl-recipes-with-modules (justfile)
+  "Return recipes from JUSTFILE and every nested Just module.
+
+Each result is (RECIPE SOURCE LOCAL-NAME).  RECIPE uses Just's qualified
+`module::recipe' name so Justl can execute it from the root JUSTFILE."
+  (let ((parsed (justl--parse justfile))
+        rows)
+    (cl-labels
+        ((visit
+          (node)
+          (let ((source (alist-get 'source node)))
+            (dolist (entry (alist-get 'recipes node))
+              (let* ((data (cdr entry))
+                     (private (alist-get 'private data))
+                     (local-name (alist-get 'name data))
+                     (qualified-name (or (alist-get 'namepath data)
+                                         local-name)))
+                (when (or justl-include-private-recipes (not private))
+                  (push
+                   (list (make-recipe
+                          :name qualified-name
+                          :doc (alist-get 'doc data)
+                          :parameters (alist-get 'parameters data)
+                          :private private)
+                         source
+                         local-name)
+                   rows))))
+            (dolist (entry (alist-get 'modules node))
+              (visit (cdr entry))))))
+      (visit parsed))
+    (nreverse rows)))
+
+(defun my/justl-tabulated-entries (rows)
+  "Convert flattened Just recipe ROWS into tabulated-list entries."
+  (mapcar
+   (lambda (row)
+     (pcase-let ((`(,recipe ,source ,local-name) row))
+       (let ((qualified-name (justl--recipe-name recipe)))
+         (list
+          qualified-name
+          (vector
+           (propertize qualified-name
+                       'recipe recipe
+                       'my/just-source source
+                       'my/just-local-name local-name)
+           (or (justl--recipe-desc recipe) ""))))))
+   rows))
+
+(defun my/justl-refresh-buffer ()
+  "Refresh the current Justl buffer, including nested module recipes."
+  (interactive)
+  (unless justl-justfile
+    (user-error "This Justl buffer has no root Justfile"))
+  (setq tabulated-list-entries
+        (my/justl-tabulated-entries
+         (my/justl-recipes-with-modules justl-justfile)))
+  (tabulated-list-print t))
+
+(defun my/justl-open (justfile)
+  "Open a Justl chooser for JUSTFILE, including all module recipes."
+  (let* ((justfile (expand-file-name justfile))
+         (directory (file-name-directory justfile))
+         (buffer-name (format "*just [%s] *" justfile)))
+    (justl--pop-to-buffer buffer-name)
+    (with-current-buffer buffer-name
+      (setq default-directory directory)
+      (justl-mode)
+      (setq-local justl-justfile justfile)
+      (setq-local justl--last-justl-buffer buffer-name)
+      (my/justl-refresh-buffer))))
+
+(defun my/justl-go-to-recipe ()
+  "Open the source definition of the root or module recipe at point."
+  (interactive)
+  (let* ((entry (tabulated-list-get-entry))
+         (name-cell (and entry (aref entry 0)))
+         (source (and name-cell
+                      (get-text-property 0 'my/just-source name-cell)))
+         (local-name (and name-cell
+                          (get-text-property 0 'my/just-local-name name-cell))))
+    (unless (and source local-name)
+      (user-error "There is no recipe on the current line"))
+    (find-file (if (file-name-absolute-p source)
+                   source
+                 (expand-file-name source
+                                   (file-name-directory justl-justfile))))
+    (goto-char (point-min))
+    (when (re-search-forward
+           (concat "^[@]?" (regexp-quote local-name) "\\(?: .*?\\)?:")
+           nil t)
+      (goto-char (line-beginning-position)))))
+
+(defun my/justl-list-buffer-setup ()
+  "Keep generated Just recipe table padding from looking like bad whitespace."
+  (setq-local show-trailing-whitespace nil))
 
 (defun my/justl-restore-compilation-errors ()
   "Let Just recipe output use normal compilation error matching."
@@ -1508,15 +1614,18 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
 (use-package justl
   :defer t
   :commands justl
-  :hook (justl-compile-mode . my/justl-restore-compilation-errors)
+  :hook ((justl-mode . my/justl-list-buffer-setup)
+         (justl-module-mode . my/justl-list-buffer-setup)
+         (justl-compile-mode . my/justl-restore-compilation-errors))
   :config
   ;; Make the recipe list act like the other selection buffers in this
   ;; profile: C-j/C-k move, RET or e runs, o opens the recipe definition.
   (keymap-set justl-mode-map "C-j" #'next-line)
   (keymap-set justl-mode-map "C-k" #'previous-line)
+  (keymap-set justl-mode-map "g" #'my/justl-refresh-buffer)
   (keymap-set justl-mode-map "RET" #'justl-exec-recipe)
   (keymap-set justl-mode-map "<return>" #'justl-exec-recipe)
-  (keymap-set justl-mode-map "o" #'justl-go-to-recipe)
+  (keymap-set justl-mode-map "o" #'my/justl-go-to-recipe)
   (keymap-set justl-mode-map "q" #'quit-window)
   (keymap-set justl-compile-mode-map "q" #'quit-window)
   (evil-set-initial-state 'justl-mode 'motion)
@@ -1525,7 +1634,7 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
     (kbd "C-k") #'previous-line
     (kbd "RET") #'justl-exec-recipe
     (kbd "e") #'justl-exec-recipe
-    (kbd "o") #'justl-go-to-recipe
+    (kbd "o") #'my/justl-go-to-recipe
     (kbd "q") #'quit-window)
   (my/bind-leader-in-keymap justl-mode-map)
   (my/bind-leader-in-keymap justl-compile-mode-map))
