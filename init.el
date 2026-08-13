@@ -70,6 +70,8 @@
 (defvar helm-source-do-ag)
 (defvar helm-white-buffer-regexp-list)
 (defvar evil-iedit-state-map)
+(defvar justl-compile-mode-map)
+(defvar justl-mode-map)
 (defvar ispell-program-name nil)
 (defvar xref--xref-buffer-mode-map)
 (defvar org-persist--disable-when-emacs-Q)
@@ -174,6 +176,8 @@
     helm
     helm-projectile
     iedit
+    just-mode
+    justl
     magit
     nerd-icons
     planet-theme
@@ -382,6 +386,60 @@
   (require 'dired-x))
 
 ;;; Small commands used by the leader map
+
+(defun my/alternate-buffer ()
+  "Switch back and forth between the current and last buffer."
+  (interactive)
+  ;; Match Spacemacs: clearing the forward list on both sides makes repeated
+  ;; SPC TAB presses toggle reliably between exactly two buffers.
+  (set-window-next-buffers nil nil)
+  (previous-buffer)
+  (set-window-next-buffers nil nil))
+
+(defun my/find-justfile (&optional directory)
+  "Find the nearest Justfile above DIRECTORY or `default-directory'."
+  (let* ((start (file-name-as-directory
+                 (expand-file-name (or directory default-directory))))
+         (names '("justfile" "Justfile" ".justfile"))
+         (root (locate-dominating-file
+                start
+                (lambda (candidate)
+                  (seq-some
+                   (lambda (name)
+                     (file-regular-p (expand-file-name name candidate)))
+                   names)))))
+    (when root
+      (seq-find #'file-regular-p
+                (mapcar (lambda (name) (expand-file-name name root)) names)))))
+
+(defun my/just-choose-recipe ()
+  "Open a recipe chooser for the nearest Justfile.
+
+The selected recipe runs in a compilation-derived buffer.  If the chooser
+cannot parse the Justfile, fall back to compiling the default `just' recipe
+from the directory containing that file."
+  (interactive)
+  (unless (executable-find "just")
+    (user-error "Cannot find `just' on PATH"))
+  (let ((justfile (my/find-justfile)))
+    (unless justfile
+      (user-error "No Justfile found above %s"
+                  (abbreviate-file-name default-directory)))
+    (condition-case error-data
+        (progn
+          (require 'justl)
+          (justl justfile))
+      (error
+       (message "Just recipe chooser failed (%s); running default recipe"
+                (error-message-string error-data))
+       (let ((default-directory (file-name-directory justfile))
+             (compilation-buffer-name-function (lambda (_) "*just*")))
+         (compile "just"))))))
+
+(defun my/justl-restore-compilation-errors ()
+  "Let Just recipe output use normal compilation error matching."
+  (kill-local-variable 'compilation-error-regexp-alist-alist)
+  (kill-local-variable 'compilation-error-regexp-alist))
 
 (defun my/helm-search-current-file-empty ()
   "Search the current file with an initially empty Helm input."
@@ -884,6 +942,7 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   "N" #'previous-error
   "c" #'compile
   "f" #'my/clang-format-region-or-buffer
+  "j" #'my/just-choose-recipe
   "k" #'kill-compilation
   "n" #'next-error
   "r" #'recompile)
@@ -1007,6 +1066,8 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
 (defvar-keymap my/leader-map
   :doc "Main leader map."
   :name "leader"
+  "TAB" #'my/alternate-buffer
+  "<tab>" #'my/alternate-buffer
   "1" #'winum-select-window-1
   "2" #'winum-select-window-2
   "3" #'winum-select-window-3
@@ -1039,12 +1100,15 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
 ;; `defvar-keymap' intentionally preserves an existing value.  Set additions
 ;; explicitly too, so evaluating init.el in a running Emacs updates the map.
 (keymap-unset my/leader-map "SPC")
+(keymap-set my/leader-map "TAB" #'my/alternate-buffer)
+(keymap-set my/leader-map "<tab>" #'my/alternate-buffer)
 (keymap-set my/leader-map "e" #'helm-M-x)
 (keymap-set my/leader-map "*" #'helm-do-ag-project-root)
 (keymap-set my/leader-map "b h" #'dashboard-open)
 (keymap-set my/leader-map "f s" #'save-buffer)
 (keymap-set my/leader-map "c f" #'my/clang-format-region-or-buffer)
 (keymap-set my/leader-map "c F" #'clang-format-buffer)
+(keymap-set my/leader-map "c j" #'my/just-choose-recipe)
 (keymap-set my/leader-map "j d" #'dired-jump)
 (keymap-set my/leader-map "j D" #'dired-jump-other-window)
 (keymap-set my/leader-map "s e" #'evil-iedit-state/iedit-mode)
@@ -1109,6 +1173,8 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   (which-key-mode 1)
   (which-key-add-keymap-based-replacements
     my/leader-map
+    "TAB" "last buffer"
+    "<tab>" "last buffer"
     "S" "spelling"
     "a" "applications"
     "b" "buffers"
@@ -1127,7 +1193,10 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   (which-key-add-keymap-based-replacements
     my/leader-search-map
     "l" "last search"
-    "o" "rg options"))
+    "o" "rg options")
+  (which-key-add-keymap-based-replacements
+    my/leader-compilation-map
+    "j" "just recipes"))
 
 (winner-mode 1)
 
@@ -1430,6 +1499,36 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   (my/bind-leader-in-keymap xref--xref-buffer-mode-map))
 
 ;;; Magit, compilation, Dired, and terminal
+
+(use-package just-mode
+  :defer t
+  :mode (("\\(?:^\\|/\\)\\(?:[Jj]ustfile\\|\\.justfile\\)\\'" . just-mode)
+         ("\\.just\\'" . just-mode)))
+
+(use-package justl
+  :defer t
+  :commands justl
+  :hook (justl-compile-mode . my/justl-restore-compilation-errors)
+  :config
+  ;; Make the recipe list act like the other selection buffers in this
+  ;; profile: C-j/C-k move, RET or e runs, o opens the recipe definition.
+  (keymap-set justl-mode-map "C-j" #'next-line)
+  (keymap-set justl-mode-map "C-k" #'previous-line)
+  (keymap-set justl-mode-map "RET" #'justl-exec-recipe)
+  (keymap-set justl-mode-map "<return>" #'justl-exec-recipe)
+  (keymap-set justl-mode-map "o" #'justl-go-to-recipe)
+  (keymap-set justl-mode-map "q" #'quit-window)
+  (keymap-set justl-compile-mode-map "q" #'quit-window)
+  (evil-set-initial-state 'justl-mode 'motion)
+  (evil-define-key* '(normal motion) justl-mode-map
+    (kbd "C-j") #'next-line
+    (kbd "C-k") #'previous-line
+    (kbd "RET") #'justl-exec-recipe
+    (kbd "e") #'justl-exec-recipe
+    (kbd "o") #'justl-go-to-recipe
+    (kbd "q") #'quit-window)
+  (my/bind-leader-in-keymap justl-mode-map)
+  (my/bind-leader-in-keymap justl-compile-mode-map))
 
 (use-package magit
   :defer t
