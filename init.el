@@ -36,13 +36,18 @@
 (declare-function helm-ag--do-ag-up-one-level "helm-ag")
 (declare-function helm-ag--up-one-level "helm-ag")
 (declare-function helm-execute-persistent-action "helm")
+(declare-function helm-beginning-of-source-p "helm-core")
+(declare-function helm-end-of-source-p "helm-core")
 (declare-function helm-keyboard-quit "helm")
 (declare-function helm-next-line "helm")
+(declare-function helm-next-source "helm")
 (declare-function helm-previous-page "helm")
 (declare-function helm-previous-line "helm")
+(declare-function helm-previous-source "helm")
 (declare-function helm-run-after-exit "helm")
 (declare-function helm-select-action "helm")
 (declare-function helm-set-local-variable "helm")
+(declare-function helm-window "helm-core")
 (declare-function kill-compilation "compile")
 (declare-function projectile-switch-project-by-name "projectile")
 (declare-function projectile-save-known-projects "projectile")
@@ -51,6 +56,7 @@
 
 (defvar helm-ag--default-target)
 (defvar helm-input)
+(defvar helm-move-to-line-cycle-in-source)
 (defvar evil-iedit-state-map)
 (defvar ispell-program-name nil)
 (defvar xref--xref-buffer-mode-map)
@@ -354,6 +360,40 @@
   "Search the current file with an initially empty Helm input."
   (interactive)
   (helm-do-ag-this-file ""))
+
+(defun my/helm--next-candidate-across-sources ()
+  "Move one Helm candidate forward, entering the next source at its end."
+  (if (with-selected-window (helm-window)
+        (helm-end-of-source-p))
+      (helm-next-source)
+    (helm-next-line 1)))
+
+(defun my/helm--previous-candidate-across-sources ()
+  "Move one Helm candidate backward, entering the previous source at its end."
+  (if (with-selected-window (helm-window)
+        (helm-beginning-of-source-p))
+      (progn
+        (helm-previous-source)
+        ;; `helm-previous-source' lands on that source's first candidate.
+        ;; Cycle once backward within it to reach its last candidate.
+        (let ((helm-move-to-line-cycle-in-source t))
+          (helm-previous-line 1)))
+    (helm-previous-line 1)))
+
+(defun my/helm-next-candidate-across-sources (&optional count)
+  "Move COUNT Helm candidates forward, crossing source boundaries."
+  (interactive "p")
+  (setq count (or count 1))
+  (let ((step (if (< count 0)
+                  #'my/helm--previous-candidate-across-sources
+                #'my/helm--next-candidate-across-sources)))
+    (dotimes (_ (abs count))
+      (funcall step))))
+
+(defun my/helm-previous-candidate-across-sources (&optional count)
+  "Move COUNT Helm candidates backward, crossing source boundaries."
+  (interactive "p")
+  (my/helm-next-candidate-across-sources (- (or count 1))))
 
 (defun my/helm-ag-omit-duplicate-current-file (original this-file)
   "Call ORIGINAL without passing THIS-FILE to ripgrep twice.
@@ -958,8 +998,10 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   :custom
   ;; Helm-AG results follow the selection: moving with C-j/C-k previews the
   ;; match in the original window and keeps the current occurrence highlighted.
+  ;; Spacemacs delegates this to Helm follow mode as well; keep only a 1 ms
+  ;; idle timer so rapid key repeats can coalesce before previewing.
   (helm-follow-mode-persistent t)
-  (helm-follow-input-idle-delay 0.1)
+  (helm-follow-input-idle-delay 0.001)
   ;; Preserve every existing window.  Helm's default display path deletes
   ;; other windows when auto-resize is active unless splitting inside is set.
   (helm-split-window-inside-p t)
@@ -986,8 +1028,11 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
    "rg --color=always --smart-case --no-heading --line-number %s -- %s %s")
   :config
   (add-hook 'helm-before-initialize-hook #'my/helm-remember-origin-window)
-  (keymap-set helm-map "C-j" #'helm-next-line)
-  (keymap-set helm-map "C-k" #'helm-previous-line)
+  (keymap-set helm-map "C-j" #'my/helm-next-candidate-across-sources)
+  (keymap-set helm-map "C-k" #'my/helm-previous-candidate-across-sources)
+  (evil-define-key '(normal insert motion) helm-map
+    (kbd "C-j") #'my/helm-next-candidate-across-sources
+    (kbd "C-k") #'my/helm-previous-candidate-across-sources)
   (keymap-set helm-map "C-u" #'helm-previous-page)
   (evil-define-key 'normal helm-map (kbd "C-u") #'helm-previous-page)
   (keymap-set helm-map "TAB" #'helm-execute-persistent-action)
