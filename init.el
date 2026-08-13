@@ -57,6 +57,9 @@
 (declare-function helm-window "helm-core")
 (declare-function justl--parse "justl")
 (declare-function justl--pop-to-buffer "justl")
+(declare-function justl--get-recipe-under-cursor "justl")
+(declare-function justl--read-arg "justl")
+(declare-function justl--recipe-args "justl")
 (declare-function justl--recipe-desc "justl")
 (declare-function justl--recipe-name "justl")
 (declare-function justl-mode "justl")
@@ -79,6 +82,7 @@
 (defvar evil-iedit-state-map)
 (defvar justl--last-justl-buffer)
 (defvar justl-compile-mode-map)
+(defvar justl-executable)
 (defvar justl-include-private-recipes)
 (defvar justl-justfile)
 (defvar justl-mode-map)
@@ -516,6 +520,25 @@ Each result is (RECIPE SOURCE LOCAL-NAME).  RECIPE uses Just's qualified
       (setq-local justl-justfile justfile)
       (setq-local justl--last-justl-buffer buffer-name)
       (my/justl-refresh-buffer))))
+
+(defun my/justl-exec-recipe ()
+  "Run the Just recipe at point in a standard compilation buffer."
+  (interactive)
+  (let* ((recipe (justl--get-recipe-under-cursor))
+         (recipe-name (justl--recipe-name recipe))
+         (arguments
+          (append
+           (list justl-executable
+                 (format "--justfile=%s" (file-local-name justl-justfile)))
+           (transient-args 'justl-help-popup)
+           (list recipe-name)
+           (mapcar #'justl--read-arg (justl--recipe-args recipe))))
+         (command (mapconcat #'shell-quote-argument arguments " "))
+         (default-directory (file-name-directory justl-justfile)))
+    ;; Justl's own process filter inserts text directly, bypassing
+    ;; `compilation-filter' and therefore normal error parsing.  Use Emacs's
+    ;; regular compilation pipeline, exactly as `M-x compile' does.
+    (compilation-start command 'compilation-mode (lambda (_) "*just*"))))
 
 (defun my/justl-go-to-recipe ()
   "Open the source definition of the root or module recipe at point."
@@ -1623,8 +1646,9 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   (keymap-set justl-mode-map "C-j" #'next-line)
   (keymap-set justl-mode-map "C-k" #'previous-line)
   (keymap-set justl-mode-map "g" #'my/justl-refresh-buffer)
-  (keymap-set justl-mode-map "RET" #'justl-exec-recipe)
-  (keymap-set justl-mode-map "<return>" #'justl-exec-recipe)
+  (keymap-set justl-mode-map "RET" #'my/justl-exec-recipe)
+  (keymap-set justl-mode-map "<return>" #'my/justl-exec-recipe)
+  (keymap-set justl-mode-map "e" #'my/justl-exec-recipe)
   (keymap-set justl-mode-map "o" #'my/justl-go-to-recipe)
   (keymap-set justl-mode-map "q" #'quit-window)
   (keymap-set justl-compile-mode-map "q" #'quit-window)
@@ -1632,8 +1656,8 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   (evil-define-key* '(normal motion) justl-mode-map
     (kbd "C-j") #'next-line
     (kbd "C-k") #'previous-line
-    (kbd "RET") #'justl-exec-recipe
-    (kbd "e") #'justl-exec-recipe
+    (kbd "RET") #'my/justl-exec-recipe
+    (kbd "e") #'my/justl-exec-recipe
     (kbd "o") #'my/justl-go-to-recipe
     (kbd "q") #'quit-window)
   (my/bind-leader-in-keymap justl-mode-map)
