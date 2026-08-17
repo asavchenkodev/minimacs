@@ -21,6 +21,7 @@
 (declare-function c-defun-name "cc-cmds")
 (declare-function c-mark-function "cc-cmds")
 (declare-function dired-find-alternate-file "dired")
+(declare-function dired-get-filename "dired")
 (declare-function dired-hide-details-mode "dired")
 (declare-function dired-up-directory "dired")
 (declare-function etags-regen--tags-cleanup "etags-regen")
@@ -86,6 +87,8 @@
 (defvar justl-include-private-recipes)
 (defvar justl-justfile)
 (defvar justl-mode-map)
+(defvar my/last-compilation-buffer nil
+  "Most recent buffer returned by `compilation-start'.")
 (defvar ispell-program-name nil)
 (defvar xref--xref-buffer-mode-map)
 (defvar org-persist--disable-when-emacs-Q)
@@ -410,6 +413,18 @@
   (previous-buffer)
   (set-window-next-buffers nil nil))
 
+(defun my/copy-file-path ()
+  "Copy the current buffer's full path, or the Dired entry at point."
+  (interactive)
+  (let ((file-path
+         (or (and buffer-file-name (file-truename buffer-file-name))
+             (and (derived-mode-p 'dired-mode)
+                  (dired-get-filename nil t)))))
+    (unless file-path
+      (user-error "Current buffer is not visiting a file"))
+    (kill-new file-path)
+    (message "%s" file-path)))
+
 (defun my/find-justfile (&optional directory)
   "Find the nearest Justfile above DIRECTORY or `default-directory'."
   (let* ((start (file-name-as-directory
@@ -539,6 +554,27 @@ Each result is (RECIPE SOURCE LOCAL-NAME).  RECIPE uses Just's qualified
     ;; `compilation-filter' and therefore normal error parsing.  Use Emacs's
     ;; regular compilation pipeline, exactly as `M-x compile' does.
     (compilation-start command 'compilation-mode (lambda (_) "*just*"))))
+
+(defun my/remember-compilation-buffer (buffer)
+  "Remember BUFFER as the latest compilation and return it unchanged."
+  (when (buffer-live-p buffer)
+    (setq my/last-compilation-buffer buffer))
+  buffer)
+
+(defun my/recompile-last (&optional edit-command)
+  "Recompile the latest compilation, even from an unrelated source buffer.
+
+Inside a compilation buffer, recompile that buffer.  With prefix argument
+EDIT-COMMAND, prompt to edit the remembered command first."
+  (interactive "P")
+  (cond
+   ((derived-mode-p 'compilation-mode)
+    (recompile edit-command))
+   ((buffer-live-p my/last-compilation-buffer)
+    (with-current-buffer my/last-compilation-buffer
+      (recompile edit-command)))
+   (t
+    (recompile edit-command))))
 
 (defun my/justl-go-to-recipe ()
   "Open the source definition of the root or module recipe at point."
@@ -989,7 +1025,8 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   "j" #'dired-jump
   "r" #'helm-recentf
   "s" #'save-buffer
-  "S" #'save-some-buffers)
+  "S" #'save-some-buffers
+  "y" #'my/copy-file-path)
 
 (defvar-keymap my/leader-project-map
   :doc "Project commands."
@@ -1074,7 +1111,7 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   "j" #'my/just-choose-recipe
   "k" #'kill-compilation
   "n" #'next-error
-  "r" #'recompile)
+  "r" #'my/recompile-last)
 
 (defvar-keymap my/c-c++-format-map
   :doc "C/C++ formatting commands."
@@ -1684,6 +1721,9 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   ;; Translate them into Emacs faces instead of displaying raw ESC[1m text.
   (require 'ansi-color)
   (add-hook 'compilation-filter-hook #'ansi-color-compilation-filter)
+  (unless (advice-member-p #'my/remember-compilation-buffer 'compilation-start)
+    (advice-add 'compilation-start :filter-return
+                #'my/remember-compilation-buffer))
   (my/bind-leader-in-keymap compilation-mode-map))
 
 (with-eval-after-load 'dired
