@@ -89,6 +89,7 @@
 (defvar justl-mode-map)
 (defvar my/last-compilation-buffer nil
   "Most recent buffer returned by `compilation-start'.")
+(defvar magit-show-long-lines-warning)
 (defvar ispell-program-name nil)
 (defvar xref--xref-buffer-mode-map)
 (defvar org-persist--disable-when-emacs-Q)
@@ -576,6 +577,11 @@ EDIT-COMMAND, prompt to edit the remembered command first."
    (t
     (recompile edit-command))))
 
+(defun my/magit-silence-long-lines-message (original &rest arguments)
+  "Call ORIGINAL with ARGUMENTS without Magit's repeated long-lines message."
+  (let ((inhibit-message t))
+    (apply original arguments)))
+
 (defun my/justl-go-to-recipe ()
   "Open the source definition of the root or module recipe at point."
   (interactive)
@@ -610,6 +616,11 @@ EDIT-COMMAND, prompt to edit the remembered command first."
   "Search the current file with an initially empty Helm input."
   (interactive)
   (helm-do-ag-this-file ""))
+
+(defun my/helm-search-current-directory-empty ()
+  "Search from `default-directory' with an initially empty Helm input."
+  (interactive)
+  (helm-do-ag (file-name-as-directory default-directory) nil ""))
 
 (defun my/helm-search-with-rg-options (command &rest arguments)
   "Call Helm-AG COMMAND with ARGUMENTS after prompting for RG options."
@@ -1075,6 +1086,7 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   "a" my/leader-search-ag-map
   "d" #'helm-do-ag
   "e" #'evil-iedit-state/iedit-mode
+  "f" #'my/helm-search-current-directory-empty
   "l" #'my/resume-last-search-buffer
   "o" my/leader-search-options-map
   "p" #'helm-do-ag-project-root
@@ -1278,6 +1290,7 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
 (keymap-set my/leader-map "j d" #'dired-jump)
 (keymap-set my/leader-map "j D" #'dired-jump-other-window)
 (keymap-set my/leader-map "s e" #'evil-iedit-state/iedit-mode)
+(keymap-set my/leader-map "s f" #'my/helm-search-current-directory-empty)
 (keymap-set my/leader-map "s l" #'my/resume-last-search-buffer)
 (keymap-set my/leader-map "s o" my/leader-search-options-map)
 (keymap-set my/leader-map "s s" #'my/helm-search-current-file-empty)
@@ -1713,7 +1726,15 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
              magit-stage-files
              magit-status
              magit-unstage-files)
+  :init
+  (setq magit-show-long-lines-warning nil)
   :config
+  ;; Preserve Magit's long-line redisplay optimizations, but do not announce
+  ;; their activation on every cursor movement through an affected buffer.
+  (unless (advice-member-p #'my/magit-silence-long-lines-message
+                           'magit-section--maybe-enable-long-lines-shortcuts)
+    (advice-add 'magit-section--maybe-enable-long-lines-shortcuts :around
+                #'my/magit-silence-long-lines-message))
   (my/bind-leader-in-keymap magit-mode-map))
 
 (with-eval-after-load 'compile
