@@ -188,9 +188,11 @@
     drag-stuff
     evil
     evil-collection
+    evil-ghostel
     expand-region
     flyspell-correct
     flyspell-correct-helm
+    ghostel
     helm
     helm-projectile
     iedit
@@ -603,8 +605,8 @@ EDIT-COMMAND, prompt to edit the remembered command first."
            nil t)
       (goto-char (line-beginning-position)))))
 
-(defun my/justl-list-buffer-setup ()
-  "Keep generated Just recipe table padding from looking like bad whitespace."
+(defun my/hide-trailing-whitespace ()
+  "Do not highlight trailing whitespace in generated or terminal buffers."
   (setq-local show-trailing-whitespace nil))
 
 (defun my/justl-restore-compilation-errors ()
@@ -1152,14 +1154,16 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
 (defvar-keymap my/leader-terminal-map
   :doc "Terminal commands."
   :name "terminals"
-  "s" my/leader-shell-map)
+  "b" #'ghostel-list-buffers
+  "p" #'ghostel-project
+  "s" my/leader-shell-map
+  "t" #'ghostel)
 
 (defvar-keymap my/leader-app-map
   :doc "Application commands."
   :name "applications"
   "d" #'dired
-  "o" my/leader-org-map
-  "t" my/leader-terminal-map)
+  "o" my/leader-org-map)
 
 (defvar-keymap my/leader-jump-map
   :doc "Jump commands."
@@ -1271,15 +1275,20 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   "n" my/leader-narrow-map
   "p" my/leader-project-map
   "s" my/leader-search-map
-  "t" my/leader-toggle-map
+  "T" my/leader-toggle-map
+  "t" my/leader-terminal-map
   "v" #'er/expand-region
   "w" my/leader-window-map)
 
 ;; `defvar-keymap' intentionally preserves an existing value.  Set additions
 ;; explicitly too, so evaluating init.el in a running Emacs updates the map.
 (keymap-unset my/leader-map "SPC")
+(keymap-unset my/leader-app-map "t")
+(keymap-unset my/leader-terminal-map "g")
 (keymap-set my/leader-map "TAB" #'my/alternate-buffer)
 (keymap-set my/leader-map "<tab>" #'my/alternate-buffer)
+(keymap-set my/leader-map "T" my/leader-toggle-map)
+(keymap-set my/leader-map "t" my/leader-terminal-map)
 (keymap-set my/leader-map "e" #'helm-M-x)
 (keymap-set my/leader-map "*" #'helm-do-ag-project-root)
 (keymap-set my/leader-map "b h" #'dashboard-open)
@@ -1289,6 +1298,9 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
 (keymap-set my/leader-map "c j" #'my/just-choose-recipe)
 (keymap-set my/leader-map "j d" #'dired-jump)
 (keymap-set my/leader-map "j D" #'dired-jump-other-window)
+(keymap-set my/leader-map "t b" #'ghostel-list-buffers)
+(keymap-set my/leader-map "t p" #'ghostel-project)
+(keymap-set my/leader-map "t t" #'ghostel)
 (keymap-set my/leader-map "s e" #'evil-iedit-state/iedit-mode)
 (keymap-set my/leader-map "s f" #'my/helm-search-current-directory-empty)
 (keymap-set my/leader-map "s l" #'my/resume-last-search-buffer)
@@ -1367,7 +1379,8 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
     "n" "narrow"
     "p" "projects"
     "s" "search"
-    "t" "toggles"
+    "T" "toggles"
+    "t" "terminals"
     "w" "windows")
   (which-key-add-keymap-based-replacements
     my/leader-search-map
@@ -1375,7 +1388,13 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
     "o" "rg options")
   (which-key-add-keymap-based-replacements
     my/leader-compilation-map
-    "j" "just recipes"))
+    "j" "just recipes")
+  (which-key-add-keymap-based-replacements
+    my/leader-terminal-map
+    "b" "Ghostel buffers"
+    "p" "Ghostel project"
+    "s" "shell popup"
+    "t" "Ghostel"))
 
 (winner-mode 1)
 
@@ -1687,8 +1706,8 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
 (use-package justl
   :defer t
   :commands justl
-  :hook ((justl-mode . my/justl-list-buffer-setup)
-         (justl-module-mode . my/justl-list-buffer-setup)
+  :hook ((justl-mode . my/hide-trailing-whitespace)
+         (justl-module-mode . my/hide-trailing-whitespace)
          (justl-compile-mode . my/justl-restore-compilation-errors))
   :config
   ;; Make the recipe list act like the other selection buffers in this
@@ -1789,12 +1808,25 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
 (use-package vterm
   :defer t
   :commands vterm
+  :hook (vterm-mode . my/hide-trailing-whitespace)
   :init
   (setq vterm-shell (or (getenv "SHELL") shell-file-name)
         vterm-max-scrollback 10000
         vterm-always-compile-module t)
   :config
   (my/bind-leader-in-keymap vterm-mode-map))
+
+(use-package ghostel
+  :defer t
+  :commands (ghostel ghostel-list-buffers ghostel-project)
+  :hook (ghostel-mode . my/hide-trailing-whitespace)
+  :init
+  (setq ghostel-module-directory
+        (expand-file-name "ghostel/" my/var-directory)))
+
+(use-package evil-ghostel
+  :after (ghostel evil)
+  :hook (ghostel-mode . evil-ghostel-mode))
 
 (use-package evil-iedit-state
   :defer t
