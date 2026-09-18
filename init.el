@@ -200,10 +200,13 @@
     justl
     magit
     nerd-icons
+    org-appear
+    org-bullets
     planet-theme
     projectile
     shell-pop
     treemacs-icons-dired
+    visual-fill-column
     vterm
     winum)
   "Packages installed from GNU ELPA, NonGNU ELPA, or MELPA.")
@@ -326,6 +329,7 @@
       inhibit-startup-screen t
       initial-scratch-message nil
       ring-bell-function #'ignore
+      use-short-answers t
       custom-safe-themes t)
 
 (add-hook 'prog-mode-hook #'display-line-numbers-mode)
@@ -1944,12 +1948,87 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
 
 ;;; Core Org
 
+(defcustom my/org-reading-width 90
+  "Width of the centered text area in Org buffers, in columns."
+  :type 'integer
+  :group 'org)
+
+(defvar-local my/org-face-remap-cookies nil
+  "Face remappings owned by `my/org-mode-settings'.")
+
 (defun my/org-mode-settings ()
-  "Apply the small visual portion of the old Org configuration."
-  (set-face-attribute 'org-level-1 nil :height 1.75 :foreground "#4f97d7")
-  (set-face-attribute 'org-level-2 nil :height 1.5)
-  (set-face-attribute 'org-level-3 nil :height 1.25)
-  (set-face-attribute 'org-ellipsis nil :inherit 'default :box nil))
+  "Give Org a quiet, document-like layout inspired by System Crafters.
+Keep these settings local: derived modes such as Dayline own their layout."
+  (when (eq major-mode 'org-mode)
+    (require 'face-remap)
+    (require 'org-indent)
+    (require 'org-bullets)
+    (require 'org-appear)
+    (require 'visual-fill-column)
+    (setq-local line-spacing 0.16
+                show-trailing-whitespace nil
+                org-hide-emphasis-markers t
+                org-hidden-keywords '(title subtitle author date)
+                org-ellipsis " ▾"
+                org-bullets-bullet-list '("◉" "○" "●" "○" "●" "○" "●")
+                org-appear-autolinks t
+                org-appear-autokeywords t
+                visual-fill-column-width my/org-reading-width
+                visual-fill-column-center-text t)
+    (display-line-numbers-mode -1)
+    (auto-fill-mode -1)
+    (visual-line-mode 1)
+    (org-indent-mode 1)
+    ;; Use a font already available on this machine; retain a portable fallback.
+    ;; Remap faces per buffer so the theme, agenda, and Dayline stay independent.
+    (mapc #'face-remap-remove-relative my/org-face-remap-cookies)
+    (setq my/org-face-remap-cookies nil)
+    (when (display-graphic-p)
+      (let ((prose-font
+             (or (seq-find (lambda (family) (find-font (font-spec :family family)))
+                           '("Iosevka Aile" "Cantarell" "Avenir Next"
+                             "Helvetica Neue" "DejaVu Sans"))
+                 "Sans Serif")))
+        (dolist (spec `((variable-pitch :family ,prose-font
+                                       :height ,(round (* 1.2 (face-attribute 'default :height))))
+                       (fixed-pitch :family ,(face-attribute 'default :family)
+                                    :height ,(face-attribute 'default :height))))
+          (push (apply #'face-remap-add-relative spec) my/org-face-remap-cookies)))
+      (variable-pitch-mode 1))
+    (dolist (spec '((org-document-title :inherit variable-pitch :height 1.65 :weight bold)
+                   (org-level-1 :inherit variable-pitch :height 1.35 :weight semi-bold)
+                   (org-level-2 :inherit variable-pitch :height 1.2 :weight semi-bold)
+                   (org-level-3 :inherit variable-pitch :height 1.1 :weight semi-bold)
+                   (org-level-4 :inherit variable-pitch :height 1.0 :weight semi-bold)
+                   (org-level-5 :inherit variable-pitch :height 1.0)
+                   (org-level-6 :inherit variable-pitch :height 1.0)
+                   (org-level-7 :inherit variable-pitch :height 1.0)
+                   (org-level-8 :inherit variable-pitch :height 1.0)
+                   (org-block :inherit fixed-pitch)
+                   (org-table :inherit fixed-pitch)
+                   (org-formula :inherit fixed-pitch)
+                   (org-code :inherit (shadow fixed-pitch))
+                   (org-verbatim :inherit (shadow fixed-pitch))
+                   (org-checkbox :inherit fixed-pitch)
+                   (org-special-keyword :inherit (font-lock-comment-face fixed-pitch))
+                   (org-meta-line :inherit (font-lock-comment-face fixed-pitch))
+                   (org-block-begin-line :inherit (shadow fixed-pitch))
+                   (org-block-end-line :inherit (shadow fixed-pitch))
+                   (org-indent :inherit (org-hide fixed-pitch))
+                   (org-ellipsis :underline nil :box nil)))
+      ;; Absolute sizes avoid multiplying the theme's own enlarged headings.
+      ;; Emacs still scales these normally with `text-scale-adjust'.
+      (let ((attributes (copy-sequence (cdr spec))))
+        (when (and (display-graphic-p) (plist-get attributes :height))
+          (setq attributes
+                (plist-put attributes :height
+                           (round (* (face-attribute 'default :height) 1.2
+                                     (plist-get attributes :height))))))
+        (push (apply #'face-remap-add-relative (car spec) attributes)
+              my/org-face-remap-cookies)))
+    (org-bullets-mode 1)
+    (org-appear-mode 1)
+    (visual-fill-column-mode 1)))
 
 (use-package org
   :ensure nil
