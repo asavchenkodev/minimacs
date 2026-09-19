@@ -1,4 +1,14 @@
-;;; init.el --- Small standalone Emacs configuration -*- lexical-binding: t; -*-
+;;; init.el --- Standalone Emacs configuration -*- lexical-binding: t; -*-
+
+;;; Where to change this configuration
+;; Package list and installation: Package bootstrap.
+;; Profile paths and operating-system tools: Profile-local state / Platform setup.
+;; Leader and global keys: Leader and global bindings; labels: Which Key below.
+;; Keys local to a mode: that package's :config block.
+;; Search, projects, Just, terminals, language tools, and Org: their sections.
+;; Machine-specific Org Notes paths: ignored var/org-notes-local.el.
+;; Generated Customize settings: ignored var/custom.el, loaded last.
+;; Search for these ;;; headings to jump between sections.
 
 ;;; Profile-local state
 
@@ -83,8 +93,6 @@
 (defvar justl-include-private-recipes)
 (defvar justl-justfile)
 (defvar justl-mode-map)
-(defvar my/last-compilation-buffer nil
-  "Most recent buffer returned by `compilation-start'.")
 (defvar magit-show-long-lines-warning)
 (defvar ispell-program-name nil)
 (defvar xref--xref-buffer-mode-map)
@@ -97,16 +105,6 @@
 (defconst my/backup-directory (expand-file-name "backups/" my/var-directory))
 (defconst my/autosave-directory (expand-file-name "auto-save/" my/var-directory))
 (defconst my/tags-directory (expand-file-name "tags/" my/var-directory))
-
-(defconst my/helm-ag-rg-options-with-values
-  '("--after-context" "--before-context" "--context"
-    "--context-separator" "--dfa-size-limit" "--encoding" "--engine"
-    "--glob" "--iglob" "--ignore-file" "--max-columns" "--max-count"
-    "--max-depth" "--max-filesize" "--path-separator" "--pre"
-    "--pre-glob" "--regexp" "--replace" "--sort" "--sortr" "--threads"
-    "--type" "--type-add" "--type-clear" "--type-not"
-    "-A" "-B" "-C" "-E" "-f" "-g" "-M" "-m" "-r" "-t" "-T" "-e")
-  "Ripgrep options whose following token is an option value, not query text.")
 
 (dolist (directory (list my/var-directory
                          my/backup-directory
@@ -242,7 +240,7 @@
 (require 'use-package)
 (setq use-package-always-ensure nil)
 
-;;; Platform environment and basic UI
+;;; Platform setup and basic UI
 
 (defun my/prepend-executable-directory (directory)
   "Prepend existing DIRECTORY to both `exec-path' and PATH."
@@ -405,7 +403,7 @@
 (with-eval-after-load 'dired
   (require 'dired-x))
 
-;;; Small commands used by the leader map
+;;; Buffer and window commands
 
 (defun my/alternate-buffer ()
   "Switch back and forth between the current and last buffer."
@@ -428,191 +426,529 @@
     (kill-new file-path)
     (message "%s" file-path)))
 
-(defun my/find-justfile (&optional directory)
-  "Find the nearest Justfile above DIRECTORY or `default-directory'."
-  (let* ((start (file-name-as-directory
-                 (expand-file-name (or directory default-directory))))
-         (names '("justfile" "Justfile" ".justfile"))
-         (root (locate-dominating-file
-                start
-                (lambda (candidate)
-                  (seq-some
-                   (lambda (name)
-                     (file-regular-p (expand-file-name name candidate)))
-                   names)))))
-    (when root
-      (seq-find #'file-regular-p
-                (mapcar (lambda (name) (expand-file-name name root)) names)))))
-
-(defun my/just-choose-recipe ()
-  "Open a recipe chooser for the nearest Justfile.
-
-The selected recipe runs in a compilation-derived buffer.  If the chooser
-cannot parse the Justfile, fall back to compiling the default `just' recipe
-from the directory containing that file."
+(defun my/delete-window-and-split-right ()
+  "Delete a window selected with Ace Window, then split to the right."
   (interactive)
-  (unless (executable-find "just")
-    (user-error "Cannot find `just' on PATH"))
-  (let ((justfile (my/find-justfile)))
-    (unless justfile
-      (user-error "No Justfile found above %s"
-                  (abbreviate-file-name default-directory)))
-    (condition-case error-data
-        (progn
-          (require 'justl)
-          (my/justl-open justfile))
-      (error
-       (message "Just recipe chooser failed (%s); running default recipe"
-                (error-message-string error-data))
-       (let ((default-directory (file-name-directory justfile))
-             (compilation-buffer-name-function (lambda (_) "*just*")))
-         (compile "just"))))))
+  (call-interactively #'ace-delete-window)
+  (split-window-right))
 
-(defun my/justl-recipes-with-modules (justfile)
-  "Return recipes from JUSTFILE and every nested Just module.
-
-Each result is (RECIPE SOURCE LOCAL-NAME).  RECIPE uses Just's qualified
-`module::recipe' name so Justl can execute it from the root JUSTFILE."
-  (let ((parsed (justl--parse justfile))
-        rows)
-    (cl-labels
-        ((visit
-          (node)
-          (let ((source (alist-get 'source node)))
-            (dolist (entry (alist-get 'recipes node))
-              (let* ((data (cdr entry))
-                     (private (alist-get 'private data))
-                     (local-name (alist-get 'name data))
-                     (qualified-name (or (alist-get 'namepath data)
-                                         local-name)))
-                (when (or justl-include-private-recipes (not private))
-                  (push
-                   (list (make-recipe
-                          :name qualified-name
-                          :doc (alist-get 'doc data)
-                          :parameters (alist-get 'parameters data)
-                          :private private)
-                         source
-                         local-name)
-                   rows))))
-            (dolist (entry (alist-get 'modules node))
-              (visit (cdr entry))))))
-      (visit parsed))
-    (nreverse rows)))
-
-(defun my/justl-tabulated-entries (rows)
-  "Convert flattened Just recipe ROWS into tabulated-list entries."
-  (mapcar
-   (lambda (row)
-     (pcase-let ((`(,recipe ,source ,local-name) row))
-       (let ((qualified-name (justl--recipe-name recipe)))
-         (list
-          qualified-name
-          (vector
-           (propertize qualified-name
-                       'recipe recipe
-                       'my/just-source source
-                       'my/just-local-name local-name)
-           (or (justl--recipe-desc recipe) ""))))))
-   rows))
-
-(defun my/justl-refresh-buffer ()
-  "Refresh the current Justl buffer, including nested module recipes."
+(defun my/split-window-below-and-focus ()
+  "Split below and select the new window."
   (interactive)
-  (unless justl-justfile
-    (user-error "This Justl buffer has no root Justfile"))
-  (setq tabulated-list-entries
-        (my/justl-tabulated-entries
-         (my/justl-recipes-with-modules justl-justfile)))
-  (tabulated-list-print t))
+  (select-window (split-window-below)))
 
-(defun my/justl-open (justfile)
-  "Open a Justl chooser for JUSTFILE, including all module recipes."
-  (let* ((justfile (expand-file-name justfile))
-         (directory (file-name-directory justfile))
-         (buffer-name (format "*just [%s] *" justfile)))
-    (justl--pop-to-buffer buffer-name)
-    (with-current-buffer buffer-name
-      (setq default-directory directory)
-      (justl-mode)
-      (setq-local justl-justfile justfile)
-      (setq-local justl--last-justl-buffer buffer-name)
-      (my/justl-refresh-buffer))))
-
-(defun my/justl-exec-recipe ()
-  "Run the Just recipe at point in a standard compilation buffer."
+(defun my/split-window-right-and-focus ()
+  "Split right and select the new window."
   (interactive)
-  (let* ((recipe (justl--get-recipe-under-cursor))
-         (recipe-name (justl--recipe-name recipe))
-         (arguments
-          (append
-           (list justl-executable
-                 (format "--justfile=%s" (file-local-name justl-justfile)))
-           (transient-args 'justl-help-popup)
-           (list recipe-name)
-           (mapcar #'justl--read-arg (justl--recipe-args recipe))))
-         (command (mapconcat #'shell-quote-argument arguments " "))
-         (default-directory (file-name-directory justl-justfile)))
-    ;; Justl's own process filter inserts text directly, bypassing
-    ;; `compilation-filter' and therefore normal error parsing.  Use Emacs's
-    ;; regular compilation pipeline, exactly as `M-x compile' does.
-    (compilation-start command 'compilation-mode (lambda (_) "*just*"))))
+  (select-window (split-window-right)))
 
-(defun my/remember-compilation-buffer (buffer)
-  "Remember BUFFER as the latest compilation and return it unchanged."
-  (when (buffer-live-p buffer)
-    (setq my/last-compilation-buffer buffer))
-  buffer)
+(defvar my/maximized-window-configuration nil)
 
-(defun my/recompile-last (&optional edit-command)
-  "Recompile the latest compilation, even from an unrelated source buffer.
-
-Inside a compilation buffer, recompile that buffer.  With prefix argument
-EDIT-COMMAND, prompt to edit the remembered command first."
-  (interactive "P")
-  (cond
-   ((derived-mode-p 'compilation-mode)
-    (recompile edit-command))
-   ((buffer-live-p my/last-compilation-buffer)
-    (with-current-buffer my/last-compilation-buffer
-      (recompile edit-command)))
-   (t
-    (recompile edit-command))))
-
-(defun my/magit-silence-long-lines-message (original &rest arguments)
-  "Call ORIGINAL with ARGUMENTS without Magit's repeated long-lines message."
-  (let ((inhibit-message t))
-    (apply original arguments)))
-
-(defun my/justl-go-to-recipe ()
-  "Open the source definition of the root or module recipe at point."
+(defun my/toggle-maximize-window ()
+  "Maximize the selected window, or restore the previous layout."
   (interactive)
-  (let* ((entry (tabulated-list-get-entry))
-         (name-cell (and entry (aref entry 0)))
-         (source (and name-cell
-                      (get-text-property 0 'my/just-source name-cell)))
-         (local-name (and name-cell
-                          (get-text-property 0 'my/just-local-name name-cell))))
-    (unless (and source local-name)
-      (user-error "There is no recipe on the current line"))
-    (find-file (if (file-name-absolute-p source)
-                   source
-                 (expand-file-name source
-                                   (file-name-directory justl-justfile))))
-    (goto-char (point-min))
-    (when (re-search-forward
-           (concat "^[@]?" (regexp-quote local-name) "\\(?: .*?\\)?:")
-           nil t)
-      (goto-char (line-beginning-position)))))
+  (if (and my/maximized-window-configuration (one-window-p))
+      (prog1 (set-window-configuration my/maximized-window-configuration)
+        (setq my/maximized-window-configuration nil))
+    (setq my/maximized-window-configuration (current-window-configuration))
+    (delete-other-windows)))
 
-(defun my/hide-trailing-whitespace ()
-  "Do not highlight trailing whitespace in generated or terminal buffers."
-  (setq-local show-trailing-whitespace nil))
+(defun my/rotate-windows (count)
+  "Rotate buffers through windows by COUNT places."
+  (interactive "p")
+  (let* ((windows (window-list nil 'no-minibuffer))
+         (states (mapcar #'window-state-get windows))
+         (window-count (length windows)))
+    (when (< window-count 2)
+      (user-error "Cannot rotate a single window"))
+    (dotimes (index window-count)
+      (window-state-put
+       (nth index states)
+       (nth (mod (+ index count) window-count) windows)))))
 
-(defun my/justl-restore-compilation-errors ()
-  "Let Just recipe output use normal compilation error matching."
-  (kill-local-variable 'compilation-error-regexp-alist-alist)
-  (kill-local-variable 'compilation-error-regexp-alist))
+(defun my/rotate-windows-backward (count)
+  "Rotate buffers backward through windows by COUNT places."
+  (interactive "p")
+  (my/rotate-windows (- count)))
+
+(defun my/switch-to-minibuffer-window ()
+  "Select the active minibuffer window."
+  (interactive)
+  (let ((window (active-minibuffer-window)))
+    (if window
+        (select-window window)
+      (user-error "The minibuffer is not active"))))
+
+(defun my/toggle-window-dedication ()
+  "Toggle whether the selected window is dedicated to its buffer."
+  (interactive)
+  (let* ((window (selected-window))
+         (dedicated (window-dedicated-p window)))
+    (set-window-dedicated-p window (not dedicated))
+    (message "Window %sdedicated" (if dedicated "no longer " ""))))
+
+(defun my/open-tmux-window ()
+  "Open a new tmux window rooted at `default-directory'."
+  (interactive)
+  (unless (executable-find "tmux")
+    (user-error "tmux is not available on PATH"))
+  (start-process "tmux-new-window" nil
+                 (executable-find "tmux")
+                 "new-window" "-c" (expand-file-name default-directory)))
+
+(defun my/disable-flymake ()
+  "Keep automatic code diagnostics disabled in this profile."
+  (when (bound-and-true-p flymake-mode)
+    (flymake-mode -1)))
+
+(add-hook 'flymake-mode-hook #'my/disable-flymake)
+
+;;; Leader and global bindings
+
+;; Keep each map object stable for Evil and package modes.  Reapply its
+;; bindings on each load so changing a key here updates a running session.
+(defun my/set-keymap-bindings (map &rest bindings)
+  "Set alternating key and definition BINDINGS in MAP on each reload."
+  (while bindings
+    (keymap-set map (pop bindings) (pop bindings))))
+
+(defvar-keymap my/leader-buffer-map
+  :doc "Buffer commands."
+  :name "buffers")
+(my/set-keymap-bindings my/leader-buffer-map
+  "b" #'helm-mini
+  "d" #'kill-current-buffer
+  "h" #'dashboard-open
+  "n" #'next-buffer
+  "p" #'previous-buffer
+  "R" #'revert-buffer
+  "s" #'scratch-buffer
+  "w" #'read-only-mode
+  "x" #'kill-buffer-and-window)
+
+(defvar-keymap my/leader-file-map
+  :doc "File commands."
+  :name "files")
+(my/set-keymap-bindings my/leader-file-map
+  "b" #'helm-filtered-bookmarks
+  "f" #'helm-find-files
+  "j" #'dired-jump
+  "r" #'helm-recentf
+  "s" #'save-buffer
+  "S" #'save-some-buffers
+  "y" #'my/copy-file-path)
+
+(defvar-keymap my/leader-project-map
+  :doc "Project commands."
+  :name "projects")
+(my/set-keymap-bindings my/leader-project-map
+  "!" #'projectile-run-shell-command-in-root
+  "&" #'projectile-run-async-shell-command-in-root
+  "%" #'projectile-replace-regexp
+  "b" #'helm-projectile-switch-to-buffer
+  "c" #'projectile-compile-project
+  "u" #'projectile-run-project
+  "d" #'helm-projectile-find-dir
+  "D" #'projectile-dired
+  "E" #'projectile-find-references
+  "f" #'helm-projectile-find-file
+  "F" #'helm-projectile-find-file-dwim
+  "g" #'xref-find-definitions
+  "G" #'my/rebuild-project-tags
+  "I" #'projectile-invalidate-cache
+  "k" #'projectile-kill-buffers
+  "/" #'helm-do-ag-project-root
+  "p" #'helm-projectile-switch-project
+  "r" #'projectile-recentf
+  "R" #'projectile-replace
+  "T" #'projectile-test-project
+  "v" #'projectile-vc)
+
+(defvar-keymap my/leader-search-ag-map
+  :doc "Spacemacs-compatible helm-ag aliases."
+  :name "helm-ag")
+(my/set-keymap-bindings my/leader-search-ag-map
+  "a" #'helm-do-ag-this-file
+  "d" #'helm-do-ag
+  "p" #'helm-do-ag-project-root)
+
+(defvar-keymap my/leader-search-options-map
+  :doc "Helm-AG searches with extra Ripgrep options."
+  :name "rg options")
+(my/set-keymap-bindings my/leader-search-options-map
+  "d" #'my/helm-search-current-directory-with-rg-options
+  "p" #'my/helm-search-project-with-rg-options
+  "s" #'my/helm-search-current-file-with-rg-options)
+
+(defvar-keymap my/leader-search-map
+  :doc "Search commands."
+  :name "search")
+(my/set-keymap-bindings my/leader-search-map
+  "P" #'helm-do-ag-project-root
+  "S" #'helm-do-ag-this-file
+  "a" my/leader-search-ag-map
+  "d" #'helm-do-ag
+  "e" #'evil-iedit-state/iedit-mode
+  "f" #'my/helm-search-current-directory-empty
+  "l" #'my/resume-last-search-buffer
+  "o" my/leader-search-options-map
+  "p" #'helm-do-ag-project-root
+  "s" #'my/helm-search-current-file-empty)
+
+(defvar-keymap my/leader-git-file-map
+  :doc "Git file commands."
+  :name "files")
+(my/set-keymap-bindings my/leader-git-file-map
+  "F" #'magit-find-file
+  "d" #'magit-diff
+  "l" #'magit-log-buffer-file
+  "m" #'magit-file-dispatch)
+
+(defvar-keymap my/leader-git-map
+  :doc "Git commands."
+  :name "git")
+(my/set-keymap-bindings my/leader-git-map
+  "c" #'magit-clone
+  "f" my/leader-git-file-map
+  "i" #'magit-init
+  "L" #'magit-list-repositories
+  "m" #'magit-dispatch
+  "s" #'magit-status
+  "S" #'magit-stage-files
+  "U" #'magit-unstage-files)
+
+(defvar-keymap my/leader-compilation-map
+  :doc "Compilation commands."
+  :name "compile")
+(my/set-keymap-bindings my/leader-compilation-map
+  "C" #'compile
+  "F" #'clang-format-buffer
+  "N" #'previous-error
+  "c" #'compile
+  "f" #'my/clang-format-region-or-buffer
+  "j" #'my/just-choose-recipe
+  "k" #'kill-compilation
+  "n" #'next-error
+  "r" #'my/recompile-last)
+
+(defvar-keymap my/c-c++-format-map
+  :doc "C/C++ formatting commands."
+  :name "format")
+(my/set-keymap-bindings my/c-c++-format-map
+  "=" #'my/clang-format-region-or-buffer
+  "f" #'my/clang-format-function)
+
+(defvar-keymap my/c-c++-leader-map
+  :doc "C/C++ commands."
+  :name "C/C++")
+(my/set-keymap-bindings my/c-c++-leader-map
+  "=" my/c-c++-format-map)
+
+(defvar-keymap my/leader-org-map
+  :doc "Org commands."
+  :name "org")
+(my/set-keymap-bindings my/leader-org-map
+  "a" #'org-agenda-list
+  "c" #'org-capture
+  "l" #'org-store-link
+  "o" #'org-agenda)
+
+(defvar-keymap my/leader-shell-map
+  :doc "Shell commands."
+  :name "shells")
+(my/set-keymap-bindings my/leader-shell-map
+  "v" #'shell-pop)
+
+(defvar-keymap my/leader-terminal-map
+  :doc "Terminal commands."
+  :name "terminals")
+(my/set-keymap-bindings my/leader-terminal-map
+  "b" #'ghostel-list-buffers
+  "p" #'ghostel-project
+  "s" my/leader-shell-map
+  "t" #'ghostel)
+
+(defvar-keymap my/leader-app-map
+  :doc "Application commands."
+  :name "applications")
+(my/set-keymap-bindings my/leader-app-map
+  "d" #'dired
+  "o" my/leader-org-map)
+
+(defvar-keymap my/leader-jump-map
+  :doc "Jump commands."
+  :name "jump")
+(my/set-keymap-bindings my/leader-jump-map
+  "d" #'dired-jump
+  "D" #'dired-jump-other-window)
+
+(defvar-keymap my/leader-help-describe-map
+  :doc "Describe commands."
+  :name "describe")
+(my/set-keymap-bindings my/leader-help-describe-map
+  "b" #'describe-bindings
+  "f" #'describe-function
+  "k" #'describe-key
+  "m" #'describe-mode
+  "v" #'describe-variable)
+
+(defvar-keymap my/leader-help-map
+  :doc "Help commands."
+  :name "help")
+(my/set-keymap-bindings my/leader-help-map
+  "d" my/leader-help-describe-map)
+
+(defvar-keymap my/leader-custom-map
+  :doc "Personal commands."
+  :name "custom")
+(my/set-keymap-bindings my/leader-custom-map
+  "d" #'my/delete-window-and-split-right
+  "f" #'my/helm-find-recursively
+  "o" #'ff-find-other-file
+  "t" #'my/open-tmux-window)
+
+(defvar-keymap my/leader-notes-map
+  :doc "Notes commands."
+  :name "notes")
+(my/set-keymap-bindings my/leader-notes-map
+  "a" #'org-notes-attach-file
+  "c" #'org-notes-weekly-activity
+  "d" #'org-notes-dashboard
+  "f" #'org-notes-find-file
+  "h" #'org-notes-habits
+  "n" #'org-notes-tasks
+  "p" #'org-notes-paste-image
+  "r" #'org-toggle-narrow-to-subtree
+  "s" #'org-notes-search)
+
+(defvar-keymap my/leader-spelling-map
+  :doc "Spelling commands."
+  :name "spelling")
+(my/set-keymap-bindings my/leader-spelling-map
+  "n" #'flyspell-goto-next-error
+  "s" #'my/flyspell-correct-at-point)
+
+(defvar-keymap my/leader-toggle-map
+  :doc "Toggle commands."
+  :name "toggles")
+(my/set-keymap-bindings my/leader-toggle-map
+  "S" #'flyspell-mode)
+
+(defvar-keymap my/leader-window-map
+  :doc "Window commands."
+  :name "windows")
+(my/set-keymap-bindings my/leader-window-map
+  "TAB" #'other-window
+  "/" #'split-window-right
+  "-" #'split-window-below
+  "=" #'balance-windows-area
+  "H" #'evil-window-move-far-left
+  "J" #'evil-window-move-very-bottom
+  "K" #'evil-window-move-very-top
+  "L" #'evil-window-move-far-right
+  "R" #'my/rotate-windows-backward
+  "S" #'my/split-window-below-and-focus
+  "U" #'winner-redo
+  "V" #'my/split-window-right-and-focus
+  "[" #'shrink-window-horizontally
+  "]" #'enlarge-window-horizontally
+  "b" #'my/switch-to-minibuffer-window
+  "d" #'delete-window
+  "f" #'follow-mode
+  "h" #'evil-window-left
+  "j" #'evil-window-down
+  "k" #'evil-window-up
+  "l" #'evil-window-right
+  "m" #'my/toggle-maximize-window
+  "o" #'other-frame
+  "r" #'my/rotate-windows
+  "s" #'split-window-below
+  "t" #'my/toggle-window-dedication
+  "u" #'winner-undo
+  "v" #'split-window-right
+  "w" #'other-window
+  "x" #'kill-buffer-and-window
+  "{" #'shrink-window
+  "}" #'enlarge-window)
+
+(defvar-keymap my/leader-map
+  :doc "Main leader map."
+  :name "leader")
+(my/set-keymap-bindings my/leader-map
+  "TAB" #'my/alternate-buffer
+  "<tab>" #'my/alternate-buffer
+  "1" #'winum-select-window-1
+  "2" #'winum-select-window-2
+  "3" #'winum-select-window-3
+  "4" #'winum-select-window-4
+  "5" #'winum-select-window-5
+  "6" #'winum-select-window-6
+  "7" #'winum-select-window-7
+  "8" #'winum-select-window-8
+  "9" #'winum-select-window-9
+  "e" #'helm-M-x
+  "*" #'helm-do-ag-project-root
+  "'" #'shell-pop
+  "/" #'helm-do-ag-project-root
+  "S" my/leader-spelling-map
+  "a" my/leader-app-map
+  "b" my/leader-buffer-map
+  "c" my/leader-compilation-map
+  "d" my/leader-custom-map
+  "f" my/leader-file-map
+  "g" my/leader-git-map
+  "h" my/leader-help-map
+  "j" my/leader-jump-map
+  "n" my/leader-notes-map
+  "p" my/leader-project-map
+  "s" my/leader-search-map
+  "T" my/leader-toggle-map
+  "t" my/leader-terminal-map
+  "v" #'er/expand-region
+  "w" my/leader-window-map
+  "x" #'org-notes-capture)
+
+;; When removing a binding, unset it here for already-running sessions.
+(keymap-unset my/leader-map "SPC")
+(keymap-unset my/leader-app-map "t")
+(keymap-unset my/leader-terminal-map "g")
+
+;;; Evil and key discovery
+
+(use-package evil
+  :demand t
+  :config
+  (evil-mode 1)
+  (evil-define-key '(normal motion visual) 'global
+    (kbd "C-u") #'evil-scroll-up)
+  (evil-define-key '(normal motion) 'global
+    (kbd "g b") #'xref-go-back
+    (kbd "g d") #'xref-find-definitions
+    (kbd "g D") #'xref-find-definitions-other-window
+    (kbd "g f") #'find-file-at-point
+    (kbd "g r") #'xref-find-references)
+  (evil-define-key '(normal motion visual) 'global (kbd "SPC") my/leader-map)
+  (evil-define-key '(insert emacs) 'global (kbd "M-m") my/leader-map))
+
+(defun my/bind-leader-in-keymap (map)
+  "Make the global leader authoritative in Evil states for MAP."
+  (let ((keymap (if (symbolp map)
+                    (and (boundp map) (symbol-value map))
+                  map)))
+    (when (keymapp keymap)
+      (evil-define-key* '(normal motion visual) keymap
+                        (kbd "SPC") my/leader-map))))
+
+(defun my/evil-collection-local-bindings (mode maps)
+  "Apply personal bindings after Evil Collection configures MODE."
+  (dolist (map maps)
+    (my/bind-leader-in-keymap map))
+  (when (eq mode 'dired)
+    (evil-define-key 'normal dired-mode-map
+      (kbd "C-h") #'dired-up-directory
+      (kbd "C-l") #'dired-find-alternate-file
+      (kbd "h") #'dired-up-directory
+      (kbd "l") #'dired-find-alternate-file)))
+
+(use-package evil-collection
+  :demand t
+  :after evil
+  :init
+  (setq evil-collection-key-blacklist '("SPC"))
+  :config
+  (add-hook 'evil-collection-setup-hook #'my/evil-collection-local-bindings)
+  (evil-collection-init))
+
+(use-package which-key
+  :ensure nil
+  :demand t
+  :custom
+  (which-key-idle-delay 0.4)
+  :config
+  (which-key-mode 1)
+  (which-key-add-keymap-based-replacements
+    my/leader-map
+    "TAB" "last buffer"
+    "<tab>" "last buffer"
+    "S" "spelling"
+    "a" "applications"
+    "b" "buffers"
+    "c" "compile"
+    "d" "custom"
+    "e" "commands"
+    "f" "files"
+    "g" "git"
+    "h" "help"
+    "j" "jump"
+    "n" "notes"
+    "p" "projects"
+    "s" "search"
+    "T" "toggles"
+    "t" "terminals"
+    "w" "windows"
+    "x" "capture")
+  (which-key-add-keymap-based-replacements
+    my/leader-notes-map
+    "a" "attach file"
+    "c" "weekly activity"
+    "d" "dashboard"
+    "f" "find note"
+    "h" "habits"
+    "n" "open tasks"
+    "p" "paste image"
+    "r" "narrow subtree"
+    "s" "search notes")
+  (which-key-add-keymap-based-replacements
+    my/leader-search-map
+    "l" "last search"
+    "o" "rg options")
+  (which-key-add-keymap-based-replacements
+    my/leader-compilation-map
+    "j" "just recipes")
+  (which-key-add-keymap-based-replacements
+    my/leader-terminal-map
+    "b" "Ghostel buffers"
+    "p" "Ghostel project"
+    "s" "shell popup"
+    "t" "Ghostel"))
+
+(winner-mode 1)
+
+(use-package winum
+  :demand t
+  :custom
+  (winum-auto-assign-0-to-minibuffer nil)
+  ;; Doom Modeline renders the number; Winum only assigns it.
+  (winum-auto-setup-mode-line nil)
+  (winum-ignored-buffers '(" *which-key*"))
+  :config
+  (winum-mode 1))
+
+;; Helm overrides these below with candidate navigation.  For other prompts,
+;; C-j/C-k move through minibuffer history and Escape cancels immediately.
+(dolist (map (list minibuffer-local-map
+                   minibuffer-local-completion-map
+                   minibuffer-local-must-match-map
+                   minibuffer-local-filename-completion-map))
+  (keymap-set map "C-j" #'next-history-element)
+  (keymap-set map "C-k" #'previous-history-element)
+  (keymap-set map "<escape>" #'abort-recursive-edit))
+
+(keymap-global-set "C-k" #'drag-stuff-up)
+(keymap-global-set "C-j" #'drag-stuff-down)
+(keymap-global-set "C-l" #'duplicate-line)
+
+;;; Helm, projects, and search
+
+(defconst my/helm-ag-rg-options-with-values
+  '("--after-context" "--before-context" "--context"
+    "--context-separator" "--dfa-size-limit" "--encoding" "--engine"
+    "--glob" "--iglob" "--ignore-file" "--max-columns" "--max-count"
+    "--max-depth" "--max-filesize" "--path-separator" "--pre"
+    "--pre-glob" "--regexp" "--replace" "--sort" "--sortr" "--threads"
+    "--type" "--type-add" "--type-clear" "--type-not"
+    "-A" "-B" "-C" "-E" "-f" "-g" "-M" "-m" "-r" "-t" "-T" "-e")
+  "Ripgrep options whose following token is an option value, not query text.")
 
 (defun my/helm-search-current-file-empty ()
   "Search the current file with an initially empty Helm input."
@@ -812,107 +1148,6 @@ latter before Helm-AG separates command options from query text."
   (require 'helm-find)
   (helm-find t))
 
-(defun my/delete-window-and-split-right ()
-  "Delete a window selected with Ace Window, then split to the right."
-  (interactive)
-  (call-interactively #'ace-delete-window)
-  (split-window-right))
-
-(defun my/split-window-below-and-focus ()
-  "Split below and select the new window."
-  (interactive)
-  (select-window (split-window-below)))
-
-(defun my/split-window-right-and-focus ()
-  "Split right and select the new window."
-  (interactive)
-  (select-window (split-window-right)))
-
-(defvar my/maximized-window-configuration nil)
-
-(defun my/toggle-maximize-window ()
-  "Maximize the selected window, or restore the previous layout."
-  (interactive)
-  (if (and my/maximized-window-configuration (one-window-p))
-      (prog1 (set-window-configuration my/maximized-window-configuration)
-        (setq my/maximized-window-configuration nil))
-    (setq my/maximized-window-configuration (current-window-configuration))
-    (delete-other-windows)))
-
-(defun my/rotate-windows (count)
-  "Rotate buffers through windows by COUNT places."
-  (interactive "p")
-  (let* ((windows (window-list nil 'no-minibuffer))
-         (states (mapcar #'window-state-get windows))
-         (window-count (length windows)))
-    (when (< window-count 2)
-      (user-error "Cannot rotate a single window"))
-    (dotimes (index window-count)
-      (window-state-put
-       (nth index states)
-       (nth (mod (+ index count) window-count) windows)))))
-
-(defun my/rotate-windows-backward (count)
-  "Rotate buffers backward through windows by COUNT places."
-  (interactive "p")
-  (my/rotate-windows (- count)))
-
-(defun my/switch-to-minibuffer-window ()
-  "Select the active minibuffer window."
-  (interactive)
-  (let ((window (active-minibuffer-window)))
-    (if window
-        (select-window window)
-      (user-error "The minibuffer is not active"))))
-
-(defun my/toggle-window-dedication ()
-  "Toggle whether the selected window is dedicated to its buffer."
-  (interactive)
-  (let* ((window (selected-window))
-         (dedicated (window-dedicated-p window)))
-    (set-window-dedicated-p window (not dedicated))
-    (message "Window %sdedicated" (if dedicated "no longer " ""))))
-
-(defun my/open-tmux-window ()
-  "Open a new tmux window rooted at `default-directory'."
-  (interactive)
-  (unless (executable-find "tmux")
-    (user-error "tmux is not available on PATH"))
-  (start-process "tmux-new-window" nil
-                 (executable-find "tmux")
-                 "new-window" "-c" (expand-file-name default-directory)))
-
-(defun my/flyspell-correct-at-point ()
-  "Correct the word at point using the Helm interface."
-  (interactive)
-  (require 'flyspell-correct-helm)
-  (customize-set-variable 'flyspell-correct-interface
-                          #'flyspell-correct-helm)
-  (call-interactively #'flyspell-correct-at-point))
-
-(defun my/clang-format-region-or-buffer (&optional style)
-  "Format the active region, or the entire buffer, using clang-format.
-Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
-  (interactive)
-  (require 'clang-format)
-  (save-excursion
-    (if (use-region-p)
-        (progn
-          (clang-format-region (region-beginning) (region-end) style)
-          (message "Formatted region"))
-      (clang-format-buffer style)
-      (message "Formatted buffer %s" (buffer-name)))))
-
-(defun my/clang-format-function (&optional style)
-  "Format the current C or C++ function using clang-format and STYLE."
-  (interactive)
-  (require 'clang-format)
-  (save-excursion
-    (c-mark-function)
-    (clang-format (region-beginning) (region-end) style)
-    (deactivate-mark)
-    (message "Formatted function %s" (or (c-defun-name) "at point"))))
-
 (defvar my/helm-project-return-directory nil
   "Project directory to re-enter after leaving a flat Projectile picker.")
 
@@ -968,484 +1203,6 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
            (let ((my/helm-ag-navigation-in-progress t))
              (helm-do-ag directory nil input)))))
     (user-error "No child search directory to return to")))
-
-(defun my/project-tags-file (root)
-  "Return a profile-local, distinct tags file for project ROOT."
-  (let* ((directory-name
-          (file-name-nondirectory (directory-file-name root)))
-         (safe-name (replace-regexp-in-string "[^[:alnum:]_.-]" "_"
-                                              directory-name))
-         (digest (substring (secure-hash 'sha1 (expand-file-name root)) 0 12)))
-    (expand-file-name (format "%s-%s-TAGS" safe-name digest)
-                      my/tags-directory)))
-
-(defun my/rebuild-project-tags ()
-  "Discard and immediately rebuild automatic ETAGS for this project."
-  (interactive)
-  (require 'project)
-  (unless (require 'etags-regen nil t)
-    (user-error "This Emacs installation does not provide etags-regen"))
-  (let ((program (my/etags-executable)))
-    (unless program
-      (user-error "Cannot find etags on PATH"))
-    (setq etags-regen-program program)
-    (let* ((project (project-current t))
-           (root (project-root project))
-           (tags-file (my/project-tags-file root)))
-      (etags-regen--tags-cleanup)
-      (when-let ((buffer (get-file-buffer tags-file)))
-        (kill-buffer buffer))
-      (when (file-exists-p tags-file)
-        (delete-file tags-file))
-      (tags-reset-tags-tables)
-      (etags-regen--tags-generate project)
-      (message "Rebuilt tags for %s" (abbreviate-file-name root)))))
-
-(defun my/disable-flymake ()
-  "Keep automatic code diagnostics disabled in this profile."
-  (when (bound-and-true-p flymake-mode)
-    (flymake-mode -1)))
-
-(add-hook 'flymake-mode-hook #'my/disable-flymake)
-
-;;; Dashboard support
-
-(defun my/nerd-icons-font-available-p ()
-  "Return non-nil when the Symbols Nerd Font is installed."
-  (and (display-graphic-p)
-       (find-font (font-spec :family "Symbols Nerd Font Mono"))))
-
-;;; Native leader keymaps
-
-(defvar-keymap my/leader-buffer-map
-  :doc "Buffer commands."
-  :name "buffers"
-  "b" #'helm-mini
-  "d" #'kill-current-buffer
-  "h" #'dashboard-open
-  "n" #'next-buffer
-  "p" #'previous-buffer
-  "R" #'revert-buffer
-  "s" #'scratch-buffer
-  "w" #'read-only-mode
-  "x" #'kill-buffer-and-window)
-
-(defvar-keymap my/leader-file-map
-  :doc "File commands."
-  :name "files"
-  "b" #'helm-filtered-bookmarks
-  "f" #'helm-find-files
-  "j" #'dired-jump
-  "r" #'helm-recentf
-  "s" #'save-buffer
-  "S" #'save-some-buffers
-  "y" #'my/copy-file-path)
-
-(defvar-keymap my/leader-project-map
-  :doc "Project commands."
-  :name "projects"
-  "!" #'projectile-run-shell-command-in-root
-  "&" #'projectile-run-async-shell-command-in-root
-  "%" #'projectile-replace-regexp
-  "b" #'helm-projectile-switch-to-buffer
-  "c" #'projectile-compile-project
-  "u" #'projectile-run-project
-  "d" #'helm-projectile-find-dir
-  "D" #'projectile-dired
-  "E" #'projectile-find-references
-  "f" #'helm-projectile-find-file
-  "F" #'helm-projectile-find-file-dwim
-  "g" #'xref-find-definitions
-  "G" #'my/rebuild-project-tags
-  "I" #'projectile-invalidate-cache
-  "k" #'projectile-kill-buffers
-  "/" #'helm-do-ag-project-root
-  "p" #'helm-projectile-switch-project
-  "r" #'projectile-recentf
-  "R" #'projectile-replace
-  "T" #'projectile-test-project
-  "v" #'projectile-vc)
-
-(defvar-keymap my/leader-search-ag-map
-  :doc "Spacemacs-compatible helm-ag aliases."
-  :name "helm-ag"
-  "a" #'helm-do-ag-this-file
-  "d" #'helm-do-ag
-  "p" #'helm-do-ag-project-root)
-
-(defvar-keymap my/leader-search-options-map
-  :doc "Helm-AG searches with extra Ripgrep options."
-  :name "rg options"
-  "d" #'my/helm-search-current-directory-with-rg-options
-  "p" #'my/helm-search-project-with-rg-options
-  "s" #'my/helm-search-current-file-with-rg-options)
-
-(defvar-keymap my/leader-search-map
-  :doc "Search commands."
-  :name "search"
-  "P" #'helm-do-ag-project-root
-  "S" #'helm-do-ag-this-file
-  "a" my/leader-search-ag-map
-  "d" #'helm-do-ag
-  "e" #'evil-iedit-state/iedit-mode
-  "f" #'my/helm-search-current-directory-empty
-  "l" #'my/resume-last-search-buffer
-  "o" my/leader-search-options-map
-  "p" #'helm-do-ag-project-root
-  "s" #'my/helm-search-current-file-empty)
-
-(defvar-keymap my/leader-git-file-map
-  :doc "Git file commands."
-  :name "files"
-  "F" #'magit-find-file
-  "d" #'magit-diff
-  "l" #'magit-log-buffer-file
-  "m" #'magit-file-dispatch)
-
-(defvar-keymap my/leader-git-map
-  :doc "Git commands."
-  :name "git"
-  "c" #'magit-clone
-  "f" my/leader-git-file-map
-  "i" #'magit-init
-  "L" #'magit-list-repositories
-  "m" #'magit-dispatch
-  "s" #'magit-status
-  "S" #'magit-stage-files
-  "U" #'magit-unstage-files)
-
-(defvar-keymap my/leader-compilation-map
-  :doc "Compilation commands."
-  :name "compile"
-  "C" #'compile
-  "F" #'clang-format-buffer
-  "N" #'previous-error
-  "c" #'compile
-  "f" #'my/clang-format-region-or-buffer
-  "j" #'my/just-choose-recipe
-  "k" #'kill-compilation
-  "n" #'next-error
-  "r" #'my/recompile-last)
-
-(defvar-keymap my/c-c++-format-map
-  :doc "C/C++ formatting commands."
-  :name "format"
-  "=" #'my/clang-format-region-or-buffer
-  "f" #'my/clang-format-function)
-
-(defvar-keymap my/c-c++-leader-map
-  :doc "C/C++ commands."
-  :name "C/C++"
-  "=" my/c-c++-format-map)
-
-(defvar-keymap my/leader-org-map
-  :doc "Org commands."
-  :name "org"
-  "a" #'org-agenda-list
-  "c" #'org-capture
-  "l" #'org-store-link
-  "o" #'org-agenda)
-
-(defvar-keymap my/leader-shell-map
-  :doc "Shell commands."
-  :name "shells"
-  "v" #'shell-pop)
-
-(defvar-keymap my/leader-terminal-map
-  :doc "Terminal commands."
-  :name "terminals"
-  "b" #'ghostel-list-buffers
-  "p" #'ghostel-project
-  "s" my/leader-shell-map
-  "t" #'ghostel)
-
-(defvar-keymap my/leader-app-map
-  :doc "Application commands."
-  :name "applications"
-  "d" #'dired
-  "o" my/leader-org-map)
-
-(defvar-keymap my/leader-jump-map
-  :doc "Jump commands."
-  :name "jump"
-  "d" #'dired-jump
-  "D" #'dired-jump-other-window)
-
-(defvar-keymap my/leader-help-describe-map
-  :doc "Describe commands."
-  :name "describe"
-  "b" #'describe-bindings
-  "f" #'describe-function
-  "k" #'describe-key
-  "m" #'describe-mode
-  "v" #'describe-variable)
-
-(defvar-keymap my/leader-help-map
-  :doc "Help commands."
-  :name "help"
-  "d" my/leader-help-describe-map)
-
-(defvar-keymap my/leader-custom-map
-  :doc "Personal commands."
-  :name "custom"
-  "d" #'my/delete-window-and-split-right
-  "f" #'my/helm-find-recursively
-  "o" #'ff-find-other-file
-  "t" #'my/open-tmux-window)
-
-(defvar-keymap my/leader-notes-map
-  :doc "Notes commands."
-  :name "notes"
-  "a" #'org-notes-attach-file
-  "c" #'org-notes-weekly-activity
-  "d" #'org-notes-dashboard
-  "f" #'org-notes-find-file
-  "h" #'org-notes-habits
-  "n" #'org-notes-tasks
-  "p" #'org-notes-paste-image
-  "r" #'org-toggle-narrow-to-subtree
-  "s" #'org-notes-search)
-
-(defvar-keymap my/leader-spelling-map
-  :doc "Spelling commands."
-  :name "spelling"
-  "n" #'flyspell-goto-next-error
-  "s" #'my/flyspell-correct-at-point)
-
-(defvar-keymap my/leader-toggle-map
-  :doc "Toggle commands."
-  :name "toggles"
-  "S" #'flyspell-mode)
-
-(defvar-keymap my/leader-window-map
-  :doc "Window commands."
-  :name "windows"
-  "TAB" #'other-window
-  "/" #'split-window-right
-  "-" #'split-window-below
-  "=" #'balance-windows-area
-  "H" #'evil-window-move-far-left
-  "J" #'evil-window-move-very-bottom
-  "K" #'evil-window-move-very-top
-  "L" #'evil-window-move-far-right
-  "R" #'my/rotate-windows-backward
-  "S" #'my/split-window-below-and-focus
-  "U" #'winner-redo
-  "V" #'my/split-window-right-and-focus
-  "[" #'shrink-window-horizontally
-  "]" #'enlarge-window-horizontally
-  "b" #'my/switch-to-minibuffer-window
-  "d" #'delete-window
-  "f" #'follow-mode
-  "h" #'evil-window-left
-  "j" #'evil-window-down
-  "k" #'evil-window-up
-  "l" #'evil-window-right
-  "m" #'my/toggle-maximize-window
-  "o" #'other-frame
-  "r" #'my/rotate-windows
-  "s" #'split-window-below
-  "t" #'my/toggle-window-dedication
-  "u" #'winner-undo
-  "v" #'split-window-right
-  "w" #'other-window
-  "x" #'kill-buffer-and-window
-  "{" #'shrink-window
-  "}" #'enlarge-window)
-
-(defvar-keymap my/leader-map
-  :doc "Main leader map."
-  :name "leader"
-  "TAB" #'my/alternate-buffer
-  "<tab>" #'my/alternate-buffer
-  "1" #'winum-select-window-1
-  "2" #'winum-select-window-2
-  "3" #'winum-select-window-3
-  "4" #'winum-select-window-4
-  "5" #'winum-select-window-5
-  "6" #'winum-select-window-6
-  "7" #'winum-select-window-7
-  "8" #'winum-select-window-8
-  "9" #'winum-select-window-9
-  "e" #'helm-M-x
-  "*" #'helm-do-ag-project-root
-  "'" #'shell-pop
-  "/" #'helm-do-ag-project-root
-  "S" my/leader-spelling-map
-  "a" my/leader-app-map
-  "b" my/leader-buffer-map
-  "c" my/leader-compilation-map
-  "d" my/leader-custom-map
-  "f" my/leader-file-map
-  "g" my/leader-git-map
-  "h" my/leader-help-map
-  "j" my/leader-jump-map
-  "n" my/leader-notes-map
-  "p" my/leader-project-map
-  "s" my/leader-search-map
-  "T" my/leader-toggle-map
-  "t" my/leader-terminal-map
-  "v" #'er/expand-region
-  "w" my/leader-window-map
-  "x" #'org-notes-capture)
-
-;; `defvar-keymap' intentionally preserves an existing value.  Set additions
-;; explicitly too, so evaluating init.el in a running Emacs updates the map.
-(keymap-unset my/leader-map "SPC")
-(keymap-unset my/leader-app-map "t")
-(keymap-unset my/leader-terminal-map "g")
-(keymap-set my/leader-map "TAB" #'my/alternate-buffer)
-(keymap-set my/leader-map "<tab>" #'my/alternate-buffer)
-(keymap-set my/leader-map "T" my/leader-toggle-map)
-(keymap-set my/leader-map "t" my/leader-terminal-map)
-(keymap-set my/leader-map "e" #'helm-M-x)
-(keymap-set my/leader-map "*" #'helm-do-ag-project-root)
-(keymap-set my/leader-map "b h" #'dashboard-open)
-(keymap-set my/leader-map "f s" #'save-buffer)
-(keymap-set my/leader-map "c f" #'my/clang-format-region-or-buffer)
-(keymap-set my/leader-map "c F" #'clang-format-buffer)
-(keymap-set my/leader-map "c j" #'my/just-choose-recipe)
-(keymap-set my/leader-map "j d" #'dired-jump)
-(keymap-set my/leader-map "j D" #'dired-jump-other-window)
-(keymap-set my/leader-map "t b" #'ghostel-list-buffers)
-(keymap-set my/leader-map "t p" #'ghostel-project)
-(keymap-set my/leader-map "t t" #'ghostel)
-(keymap-set my/leader-map "s e" #'evil-iedit-state/iedit-mode)
-(keymap-set my/leader-map "s f" #'my/helm-search-current-directory-empty)
-(keymap-set my/leader-map "s l" #'my/resume-last-search-buffer)
-(keymap-set my/leader-map "s o" my/leader-search-options-map)
-(keymap-set my/leader-map "s s" #'my/helm-search-current-file-empty)
-(keymap-set my/leader-map "s S" #'helm-do-ag-this-file)
-(keymap-set my/leader-map "v" #'er/expand-region)
-(keymap-set my/leader-map "n" my/leader-notes-map)
-(keymap-set my/leader-map "x" #'org-notes-capture)
-
-;;; Evil and key discovery
-
-(use-package evil
-  :demand t
-  :config
-  (evil-mode 1)
-  (evil-define-key '(normal motion visual) 'global
-    (kbd "C-u") #'evil-scroll-up)
-  (evil-define-key '(normal motion) 'global
-    (kbd "g b") #'xref-go-back
-    (kbd "g d") #'xref-find-definitions
-    (kbd "g D") #'xref-find-definitions-other-window
-    (kbd "g f") #'find-file-at-point
-    (kbd "g r") #'xref-find-references)
-  (evil-define-key '(normal motion visual) 'global (kbd "SPC") my/leader-map)
-  (evil-define-key '(insert emacs) 'global (kbd "M-m") my/leader-map))
-
-(defun my/bind-leader-in-keymap (map)
-  "Make the global leader authoritative in Evil states for MAP."
-  (let ((keymap (if (symbolp map)
-                    (and (boundp map) (symbol-value map))
-                  map)))
-    (when (keymapp keymap)
-      (evil-define-key* '(normal motion visual) keymap
-                        (kbd "SPC") my/leader-map))))
-
-(defun my/evil-collection-local-bindings (mode maps)
-  "Apply personal bindings after Evil Collection configures MODE."
-  (dolist (map maps)
-    (my/bind-leader-in-keymap map))
-  (when (eq mode 'dired)
-    (evil-define-key 'normal dired-mode-map
-      (kbd "C-h") #'dired-up-directory
-      (kbd "C-l") #'dired-find-alternate-file
-      (kbd "h") #'dired-up-directory
-      (kbd "l") #'dired-find-alternate-file)))
-
-(use-package evil-collection
-  :demand t
-  :after evil
-  :init
-  (setq evil-collection-key-blacklist '("SPC"))
-  :config
-  (add-hook 'evil-collection-setup-hook #'my/evil-collection-local-bindings)
-  (evil-collection-init))
-
-(use-package which-key
-  :ensure nil
-  :demand t
-  :custom
-  (which-key-idle-delay 0.4)
-  :config
-  (which-key-mode 1)
-  (which-key-add-keymap-based-replacements
-    my/leader-map
-    "TAB" "last buffer"
-    "<tab>" "last buffer"
-    "S" "spelling"
-    "a" "applications"
-    "b" "buffers"
-    "c" "compile"
-    "d" "custom"
-    "e" "commands"
-    "f" "files"
-    "g" "git"
-    "h" "help"
-    "j" "jump"
-    "n" "notes"
-    "p" "projects"
-    "s" "search"
-    "T" "toggles"
-    "t" "terminals"
-    "w" "windows"
-    "x" "capture")
-  (which-key-add-keymap-based-replacements
-    my/leader-notes-map
-    "a" "attach file"
-    "c" "weekly activity"
-    "d" "dashboard"
-    "f" "find note"
-    "h" "habits"
-    "n" "open tasks"
-    "p" "paste image"
-    "r" "narrow subtree"
-    "s" "search notes")
-  (which-key-add-keymap-based-replacements
-    my/leader-search-map
-    "l" "last search"
-    "o" "rg options")
-  (which-key-add-keymap-based-replacements
-    my/leader-compilation-map
-    "j" "just recipes")
-  (which-key-add-keymap-based-replacements
-    my/leader-terminal-map
-    "b" "Ghostel buffers"
-    "p" "Ghostel project"
-    "s" "shell popup"
-    "t" "Ghostel"))
-
-(winner-mode 1)
-
-(use-package winum
-  :demand t
-  :custom
-  (winum-auto-assign-0-to-minibuffer nil)
-  ;; Doom Modeline renders the number; Winum only assigns it.
-  (winum-auto-setup-mode-line nil)
-  (winum-ignored-buffers '(" *which-key*"))
-  :config
-  (winum-mode 1))
-
-;; Helm overrides these below with candidate navigation.  For other prompts,
-;; C-j/C-k move through minibuffer history and Escape cancels immediately.
-(dolist (map (list minibuffer-local-map
-                   minibuffer-local-completion-map
-                   minibuffer-local-must-match-map
-                   minibuffer-local-filename-completion-map))
-  (keymap-set map "C-j" #'next-history-element)
-  (keymap-set map "C-k" #'previous-history-element)
-  (keymap-set map "<escape>" #'abort-recursive-edit))
-
-(keymap-global-set "C-k" #'drag-stuff-up)
-(keymap-global-set "C-j" #'drag-stuff-down)
-(keymap-global-set "C-l" #'duplicate-line)
-
-;;; Helm, projects, and search
 
 (use-package helm
   :defer t
@@ -1545,17 +1302,6 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
         projectile-known-projects-file
         (expand-file-name "projectile-bookmarks.eld" my/var-directory)))
 
-(use-package daily-worklog
-  :ensure nil
-  :load-path "lisp"
-  :demand t
-  :custom
-  (daily-worklog-directory
-   (expand-file-name "daily-worklog/" my/var-directory))
-  (daily-worklog-save-interval 900)
-  :config
-  (daily-worklog-mode 1))
-
 (use-package helm-projectile
   :defer t
   :after (helm projectile)
@@ -1597,6 +1343,13 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
       (setq projectile-known-projects
             (delete-dups (append projects projectile-known-projects)))
       (projectile-save-known-projects))))
+
+;;; Dashboard
+
+(defun my/nerd-icons-font-available-p ()
+  "Return non-nil when the Symbols Nerd Font is installed."
+  (and (display-graphic-p)
+       (find-font (font-spec :family "Symbols Nerd Font Mono"))))
 
 (use-package dashboard
   :demand t
@@ -1687,7 +1440,39 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
     (advice-add 'helm-ag--construct-command :around
                 #'my/helm-ag-omit-duplicate-current-file)))
 
-;;; Automatic project tags and xref
+;;; Project tags and xref
+
+(defun my/project-tags-file (root)
+  "Return a profile-local, distinct tags file for project ROOT."
+  (let* ((directory-name
+          (file-name-nondirectory (directory-file-name root)))
+         (safe-name (replace-regexp-in-string "[^[:alnum:]_.-]" "_"
+                                              directory-name))
+         (digest (substring (secure-hash 'sha1 (expand-file-name root)) 0 12)))
+    (expand-file-name (format "%s-%s-TAGS" safe-name digest)
+                      my/tags-directory)))
+
+(defun my/rebuild-project-tags ()
+  "Discard and immediately rebuild automatic ETAGS for this project."
+  (interactive)
+  (require 'project)
+  (unless (require 'etags-regen nil t)
+    (user-error "This Emacs installation does not provide etags-regen"))
+  (let ((program (my/etags-executable)))
+    (unless program
+      (user-error "Cannot find etags on PATH"))
+    (setq etags-regen-program program)
+    (let* ((project (project-current t))
+           (root (project-root project))
+           (tags-file (my/project-tags-file root)))
+      (etags-regen--tags-cleanup)
+      (when-let ((buffer (get-file-buffer tags-file)))
+        (kill-buffer buffer))
+      (when (file-exists-p tags-file)
+        (delete-file tags-file))
+      (tags-reset-tags-tables)
+      (etags-regen--tags-generate project)
+      (message "Rebuilt tags for %s" (abbreviate-file-name root)))))
 
 (setq etags-regen-program (or (my/etags-executable) "etags")
       etags-regen-tags-file #'my/project-tags-file
@@ -1719,7 +1504,167 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
     (kbd "RET") #'xref-goto-xref)
   (my/bind-leader-in-keymap xref--xref-buffer-mode-map))
 
-;;; Magit, compilation, Dired, and terminal
+;;; Just recipes
+
+(defun my/find-justfile (&optional directory)
+  "Find the nearest Justfile above DIRECTORY or `default-directory'."
+  (let* ((start (file-name-as-directory
+                 (expand-file-name (or directory default-directory))))
+         (names '("justfile" "Justfile" ".justfile"))
+         (root (locate-dominating-file
+                start
+                (lambda (candidate)
+                  (seq-some
+                   (lambda (name)
+                     (file-regular-p (expand-file-name name candidate)))
+                   names)))))
+    (when root
+      (seq-find #'file-regular-p
+                (mapcar (lambda (name) (expand-file-name name root)) names)))))
+
+(defun my/just-choose-recipe ()
+  "Open a recipe chooser for the nearest Justfile.
+
+The selected recipe runs in a compilation-derived buffer.  If the chooser
+cannot parse the Justfile, fall back to compiling the default `just' recipe
+from the directory containing that file."
+  (interactive)
+  (unless (executable-find "just")
+    (user-error "Cannot find `just' on PATH"))
+  (let ((justfile (my/find-justfile)))
+    (unless justfile
+      (user-error "No Justfile found above %s"
+                  (abbreviate-file-name default-directory)))
+    (condition-case error-data
+        (progn
+          (require 'justl)
+          (my/justl-open justfile))
+      (error
+       (message "Just recipe chooser failed (%s); running default recipe"
+                (error-message-string error-data))
+       (let ((default-directory (file-name-directory justfile))
+             (compilation-buffer-name-function (lambda (_) "*just*")))
+         (compile "just"))))))
+
+(defun my/justl-recipes-with-modules (justfile)
+  "Return recipes from JUSTFILE and every nested Just module.
+
+Each result is (RECIPE SOURCE LOCAL-NAME).  RECIPE uses Just's qualified
+`module::recipe' name so Justl can execute it from the root JUSTFILE."
+  (let ((parsed (justl--parse justfile))
+        rows)
+    (cl-labels
+        ((visit
+          (node)
+          (let ((source (alist-get 'source node)))
+            (dolist (entry (alist-get 'recipes node))
+              (let* ((data (cdr entry))
+                     (private (alist-get 'private data))
+                     (local-name (alist-get 'name data))
+                     (qualified-name (or (alist-get 'namepath data)
+                                         local-name)))
+                (when (or justl-include-private-recipes (not private))
+                  (push
+                   (list (make-recipe
+                          :name qualified-name
+                          :doc (alist-get 'doc data)
+                          :parameters (alist-get 'parameters data)
+                          :private private)
+                         source
+                         local-name)
+                   rows))))
+            (dolist (entry (alist-get 'modules node))
+              (visit (cdr entry))))))
+      (visit parsed))
+    (nreverse rows)))
+
+(defun my/justl-tabulated-entries (rows)
+  "Convert flattened Just recipe ROWS into tabulated-list entries."
+  (mapcar
+   (lambda (row)
+     (pcase-let ((`(,recipe ,source ,local-name) row))
+       (let ((qualified-name (justl--recipe-name recipe)))
+         (list
+          qualified-name
+          (vector
+           (propertize qualified-name
+                       'recipe recipe
+                       'my/just-source source
+                       'my/just-local-name local-name)
+           (or (justl--recipe-desc recipe) ""))))))
+   rows))
+
+(defun my/justl-refresh-buffer ()
+  "Refresh the current Justl buffer, including nested module recipes."
+  (interactive)
+  (unless justl-justfile
+    (user-error "This Justl buffer has no root Justfile"))
+  (setq tabulated-list-entries
+        (my/justl-tabulated-entries
+         (my/justl-recipes-with-modules justl-justfile)))
+  (tabulated-list-print t))
+
+(defun my/justl-open (justfile)
+  "Open a Justl chooser for JUSTFILE, including all module recipes."
+  (let* ((justfile (expand-file-name justfile))
+         (directory (file-name-directory justfile))
+         (buffer-name (format "*just [%s] *" justfile)))
+    (justl--pop-to-buffer buffer-name)
+    (with-current-buffer buffer-name
+      (setq default-directory directory)
+      (justl-mode)
+      (setq-local justl-justfile justfile)
+      (setq-local justl--last-justl-buffer buffer-name)
+      (my/justl-refresh-buffer))))
+
+(defun my/justl-exec-recipe ()
+  "Run the Just recipe at point in a standard compilation buffer."
+  (interactive)
+  (let* ((recipe (justl--get-recipe-under-cursor))
+         (recipe-name (justl--recipe-name recipe))
+         (arguments
+          (append
+           (list justl-executable
+                 (format "--justfile=%s" (file-local-name justl-justfile)))
+           (transient-args 'justl-help-popup)
+           (list recipe-name)
+           (mapcar #'justl--read-arg (justl--recipe-args recipe))))
+         (command (mapconcat #'shell-quote-argument arguments " "))
+         (default-directory (file-name-directory justl-justfile)))
+    ;; Justl's own process filter inserts text directly, bypassing
+    ;; `compilation-filter' and therefore normal error parsing.  Use Emacs's
+    ;; regular compilation pipeline, exactly as `M-x compile' does.
+    (compilation-start command 'compilation-mode (lambda (_) "*just*"))))
+
+(defun my/justl-go-to-recipe ()
+  "Open the source definition of the root or module recipe at point."
+  (interactive)
+  (let* ((entry (tabulated-list-get-entry))
+         (name-cell (and entry (aref entry 0)))
+         (source (and name-cell
+                      (get-text-property 0 'my/just-source name-cell)))
+         (local-name (and name-cell
+                          (get-text-property 0 'my/just-local-name name-cell))))
+    (unless (and source local-name)
+      (user-error "There is no recipe on the current line"))
+    (find-file (if (file-name-absolute-p source)
+                   source
+                 (expand-file-name source
+                                   (file-name-directory justl-justfile))))
+    (goto-char (point-min))
+    (when (re-search-forward
+           (concat "^[@]?" (regexp-quote local-name) "\\(?: .*?\\)?:")
+           nil t)
+      (goto-char (line-beginning-position)))))
+
+(defun my/justl-restore-compilation-errors ()
+  "Let Just recipe output use normal compilation error matching."
+  (kill-local-variable 'compilation-error-regexp-alist-alist)
+  (kill-local-variable 'compilation-error-regexp-alist))
+
+(defun my/hide-trailing-whitespace ()
+  "Do not highlight trailing whitespace in generated or terminal buffers."
+  (setq-local show-trailing-whitespace nil))
 
 (use-package just-mode
   :defer t
@@ -1755,6 +1700,13 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   (my/bind-leader-in-keymap justl-mode-map)
   (my/bind-leader-in-keymap justl-compile-mode-map))
 
+;;; Magit
+
+(defun my/magit-silence-long-lines-message (original &rest arguments)
+  "Call ORIGINAL with ARGUMENTS without Magit's repeated long-lines message."
+  (let ((inhibit-message t))
+    (apply original arguments)))
+
 (use-package magit
   :defer t
   :commands (magit-clone
@@ -1779,6 +1731,32 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
                 #'my/magit-silence-long-lines-message))
   (my/bind-leader-in-keymap magit-mode-map))
 
+;;; Compilation
+
+(defvar my/last-compilation-buffer nil
+  "Most recent buffer returned by `compilation-start'.")
+
+(defun my/remember-compilation-buffer (buffer)
+  "Remember BUFFER as the latest compilation and return it unchanged."
+  (when (buffer-live-p buffer)
+    (setq my/last-compilation-buffer buffer))
+  buffer)
+
+(defun my/recompile-last (&optional edit-command)
+  "Recompile the latest compilation, even from an unrelated source buffer.
+
+Inside a compilation buffer, recompile that buffer.  With prefix argument
+EDIT-COMMAND, prompt to edit the remembered command first."
+  (interactive "P")
+  (cond
+   ((derived-mode-p 'compilation-mode)
+    (recompile edit-command))
+   ((buffer-live-p my/last-compilation-buffer)
+    (with-current-buffer my/last-compilation-buffer
+      (recompile edit-command)))
+   (t
+    (recompile edit-command))))
+
 (with-eval-after-load 'compile
   ;; Commands such as Just and CMake may emit terminal color/bold sequences.
   ;; Translate them into Emacs faces instead of displaying raw ESC[1m text.
@@ -1788,6 +1766,8 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
     (advice-add 'compilation-start :filter-return
                 #'my/remember-compilation-buffer))
   (my/bind-leader-in-keymap compilation-mode-map))
+
+;;; Dired and terminals
 
 (with-eval-after-load 'dired
   (my/bind-leader-in-keymap dired-mode-map)
@@ -1869,6 +1849,31 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   (expand-region-contract-fast-key "V")
   (expand-region-reset-fast-key "r"))
 
+;;; C and C++ formatting
+
+(defun my/clang-format-region-or-buffer (&optional style)
+  "Format the active region, or the entire buffer, using clang-format.
+Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
+  (interactive)
+  (require 'clang-format)
+  (save-excursion
+    (if (use-region-p)
+        (progn
+          (clang-format-region (region-beginning) (region-end) style)
+          (message "Formatted region"))
+      (clang-format-buffer style)
+      (message "Formatted buffer %s" (buffer-name)))))
+
+(defun my/clang-format-function (&optional style)
+  "Format the current C or C++ function using clang-format and STYLE."
+  (interactive)
+  (require 'clang-format)
+  (save-excursion
+    (c-mark-function)
+    (clang-format (region-beginning) (region-end) style)
+    (deactivate-mark)
+    (message "Formatted function %s" (or (c-defun-name) "at point"))))
+
 (use-package clang-format
   :defer t
   :commands (clang-format-buffer clang-format-region)
@@ -1930,6 +1935,14 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
 
 ;;; Spelling
 
+(defun my/flyspell-correct-at-point ()
+  "Correct the word at point using the Helm interface."
+  (interactive)
+  (require 'flyspell-correct-helm)
+  (customize-set-variable 'flyspell-correct-interface
+                          #'flyspell-correct-helm)
+  (call-interactively #'flyspell-correct-at-point))
+
 (when-let ((checker (my/spell-checker-executable)))
   (setq ispell-program-name checker))
 
@@ -1965,7 +1978,20 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   :after flyspell-correct
   :commands flyspell-correct-helm)
 
-;;; Core Org
+;;; Daily worklog
+
+(use-package daily-worklog
+  :ensure nil
+  :load-path "lisp"
+  :demand t
+  :custom
+  (daily-worklog-directory
+   (expand-file-name "daily-worklog/" my/var-directory))
+  (daily-worklog-save-interval 900)
+  :config
+  (daily-worklog-mode 1))
+
+;;; Org and Org Notes
 
 (defcustom my/org-reading-width 90
   "Width of the centered text area in Org buffers, in columns."
