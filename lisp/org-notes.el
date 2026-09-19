@@ -150,6 +150,17 @@ Set this in the ignored var/org-notes-local.el for each machine."
       (insert "* " heading "\n")
       (forward-line -1))))
 
+(defun org-notes--habit-capture-target ()
+  "Visit the dedicated habits file for a top-level habit capture."
+  (let ((file (expand-file-name "habits.org" (org-notes--root))))
+    (make-directory (file-name-directory file) t)
+    (set-buffer (find-file-noselect file))
+    (unless (derived-mode-p 'org-mode) (org-mode))
+    (widen)
+    (when (= (buffer-size) 0)
+      (insert "#+title: Habits\n#+startup: overview\n\n"))
+    (goto-char (point-max))))
+
 (defun org-notes--note-capture-target ()
   "Visit the new standalone Org file selected by the note template."
   (unless (and org-notes--note-title
@@ -262,7 +273,7 @@ repeater.  BODY-POINT places the editing cursor in the body."
      (function org-notes--event-template) :empty-lines 1)
     ("m" "Meeting" entry (function org-notes--capture-target)
      (function org-notes--meeting-template) :empty-lines 1)
-    ("h" "Habit" entry (function org-notes--capture-target)
+    ("h" "Habit" entry (function org-notes--habit-capture-target)
      (function org-notes--habit-template) :empty-lines 1))
   "Capture templates installed by `org-notes-setup'.")
 

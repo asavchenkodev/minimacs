@@ -188,16 +188,35 @@
         (org-capture nil "h")
         (insert "Walk")
         (org-capture-finalize)))
-    (let ((file (car (org-notes-files))))
+    (let ((file (expand-file-name "habits.org" root)))
+      (should (equal (org-notes-files) (list file)))
       (with-temp-buffer
         (insert-file-contents file)
+        (should (re-search-forward "^#\\+title: Habits$" nil t))
         (should (re-search-forward
-                 "^\\*\\* TODO Walk.*:habit:project_health:" nil t))
+                 "^\\* TODO Walk.*:habit:project_health:" nil t))
         (should (re-search-forward "^SCHEDULED: <.* \\.\\+1d>" nil t))
         (should (re-search-forward "^:STYLE: habit$" nil t))
         (should (re-search-forward "^:LOGGING: logrepeat$" nil t))
         (should (re-search-forward "^Captured: \\[.*[0-9][0-9]:[0-9][0-9]\\]$"
                                    nil t))))))
+
+(ert-deftest org-notes-habit-captures-remain-top-level-in-one-file ()
+  (org-notes-test--with-root
+    (org-notes-setup)
+    (cl-letf (((symbol-function 'org-notes--read-project-tag)
+               (lambda () nil)))
+      (dolist (title '("Walk" "Read"))
+        (let ((org-notes--capture-active nil))
+          (org-capture nil "h")
+          (insert title)
+          (org-capture-finalize))))
+    (let ((file (expand-file-name "habits.org" root)))
+      (with-temp-buffer
+        (insert-file-contents file)
+        (should (re-search-forward "^\\* TODO Walk :habit:" nil t))
+        (should (re-search-forward "^\\* TODO Read :habit:" nil t))
+        (should-not (re-search-forward "^\\*\\* TODO" nil t))))))
 
 (ert-deftest org-notes-habit-completion-uses-native-repeat-log-without-note ()
   (org-notes-test--with-root
@@ -344,15 +363,19 @@
            (tomorrow (format-time-string
                       "%Y-%m-%d %a" (time-add nil (days-to-time 1)))))
       (org-notes-test--write
-       root "weekly/current.org"
-       (format (concat "* TODO Daily walk :habit:\n"
+       root "habits.org"
+       (format (concat "#+title: Habits\n\n"
+                       "* TODO Daily walk :habit:\n"
                        "SCHEDULED: <%s .+1d>\n"
-                       ":PROPERTIES:\n:STYLE: habit\n:END:\n"
-                       "* TODO Submit report :task:\n"
+                       ":PROPERTIES:\n:STYLE: habit\n:END:\n")
+               today))
+      (org-notes-test--write
+       root "weekly/current.org"
+       (format (concat "* TODO Submit report :task:\n"
                        "DEADLINE: <%s>\n"
                        "* Event :event:\nOccurs: <%s>\n"
                        "* DONE Finished task :task:\n")
-               today tomorrow tomorrow))
+               tomorrow tomorrow))
       (org-notes-test--write root "weekly/old.org"
                              "* TODO Older open task :task:\n"))
     (org-notes-setup)
