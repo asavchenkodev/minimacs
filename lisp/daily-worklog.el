@@ -606,6 +606,43 @@ This function performs no filesystem access."
     (daily-worklog--summary-for-date date now)))
 
 ;;;###autoload
+(defun daily-worklog-summary-for-date (date)
+  "Return the available worklog summary for DATE, or nil.
+
+DATE must use YYYY-MM-DD.  The returned value has the same shape as
+`daily-worklog-current-summary'.  Unsaved in-memory totals are included, as
+is the active interval when DATE is today.  This function never writes a
+report.  Invalid dates and unreadable report files signal an error so callers
+can distinguish unavailable data from a day with no recorded activity."
+  (unless (daily-worklog--valid-date-p date)
+    (user-error "Invalid date: %s" date))
+  (let* ((now (current-time))
+         (today (daily-worklog--date-string now))
+         (active-today-p (and (string= date today)
+                              daily-worklog--running-p))
+         (persisted (when (file-exists-p (daily-worklog--date-file date))
+                      ;; Read even when the date is already cached.  Besides
+                      ;; returning persisted data this preserves the public
+                      ;; contract that a corrupt report is reported as such.
+                      (daily-worklog--read-summary date))))
+    (when active-today-p
+      ;; End and immediately resume the active interval.  This updates only
+      ;; the in-memory aggregate; it neither saves nor interrupts tracking.
+      (daily-worklog--checkpoint now t))
+    (unless (gethash date daily-worklog--loaded-dates)
+      (when persisted (daily-worklog--merge-summary persisted))
+      ;; Do not cache a genuinely missing day.  If a report appears later in
+      ;; the same session (for example after a midnight save), a later reader
+      ;; should still discover it.
+      (when (or persisted (gethash date daily-worklog--dates))
+        (puthash date t daily-worklog--loaded-dates)))
+    (if (or active-today-p
+            persisted
+            (gethash date daily-worklog--dates))
+        (daily-worklog--summary-for-date date now)
+      nil)))
+
+;;;###autoload
 (defun daily-worklog-show-date (date)
   "Display the worklog report for local DATE in YYYY-MM-DD form."
   (interactive

@@ -1,9 +1,5 @@
 ;;; init.el --- Small standalone Emacs configuration -*- lexical-binding: t; -*-
 
-;; Start this profile without touching Spacemacs:
-;; /Applications/Emacs.app/Contents/MacOS/Emacs \
-;;   --init-directory=/Users/asv/projects/emacs-config
-
 ;;; Profile-local state
 
 (require 'package)
@@ -1197,10 +1193,18 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   "o" #'ff-find-other-file
   "t" #'my/open-tmux-window)
 
-(defvar-keymap my/leader-narrow-map
-  :doc "Narrowing commands."
-  :name "narrow"
-  "s" #'org-toggle-narrow-to-subtree)
+(defvar-keymap my/leader-notes-map
+  :doc "Notes commands."
+  :name "notes"
+  "a" #'org-notes-attach-file
+  "c" #'org-notes-weekly-activity
+  "d" #'org-notes-dashboard
+  "f" #'org-notes-find-file
+  "h" #'org-notes-habits
+  "n" #'org-notes-tasks
+  "p" #'org-notes-paste-image
+  "r" #'org-toggle-narrow-to-subtree
+  "s" #'org-notes-search)
 
 (defvar-keymap my/leader-spelling-map
   :doc "Spelling commands."
@@ -1276,13 +1280,14 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   "g" my/leader-git-map
   "h" my/leader-help-map
   "j" my/leader-jump-map
-  "n" my/leader-narrow-map
+  "n" my/leader-notes-map
   "p" my/leader-project-map
   "s" my/leader-search-map
   "T" my/leader-toggle-map
   "t" my/leader-terminal-map
   "v" #'er/expand-region
-  "w" my/leader-window-map)
+  "w" my/leader-window-map
+  "x" #'org-notes-capture)
 
 ;; `defvar-keymap' intentionally preserves an existing value.  Set additions
 ;; explicitly too, so evaluating init.el in a running Emacs updates the map.
@@ -1312,6 +1317,8 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
 (keymap-set my/leader-map "s s" #'my/helm-search-current-file-empty)
 (keymap-set my/leader-map "s S" #'helm-do-ag-this-file)
 (keymap-set my/leader-map "v" #'er/expand-region)
+(keymap-set my/leader-map "n" my/leader-notes-map)
+(keymap-set my/leader-map "x" #'org-notes-capture)
 
 ;;; Evil and key discovery
 
@@ -1380,12 +1387,24 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
     "g" "git"
     "h" "help"
     "j" "jump"
-    "n" "narrow"
+    "n" "notes"
     "p" "projects"
     "s" "search"
     "T" "toggles"
     "t" "terminals"
-    "w" "windows")
+    "w" "windows"
+    "x" "capture")
+  (which-key-add-keymap-based-replacements
+    my/leader-notes-map
+    "a" "attach file"
+    "c" "weekly activity"
+    "d" "dashboard"
+    "f" "find note"
+    "h" "habits"
+    "n" "open tasks"
+    "p" "paste image"
+    "r" "narrow subtree"
+    "s" "search notes")
   (which-key-add-keymap-based-replacements
     my/leader-search-map
     "l" "last search"
@@ -2066,8 +2085,31 @@ Keep these settings local: derived modes such as Dayline own their layout."
      (python . t)
      (C . t))))
 
-;; Customizations made through Customize are generated separately and loaded
-;; last, so this remains the only hand-authored Emacs configuration file.
+(use-package org-notes
+  :ensure nil
+  :load-path "lisp"
+  :demand t
+  :commands (org-notes-capture
+             org-notes-search
+             org-notes-find-file
+             org-notes-weekly-activity
+             org-notes-dashboard
+             org-notes-tasks
+             org-notes-habits
+             org-notes-attach-file
+             org-notes-paste-image)
+  :config
+  ;; Keep machine-specific notes paths out of the tracked configuration.
+  ;; This file lives below the already Git-ignored var/ directory.
+  (load (expand-file-name "org-notes-local.el" my/var-directory)
+        t 'nomessage)
+  (org-notes-setup))
+
+(setq org-log-into-drawer t)
+(setq org-log-done 'time)
+
+;; Customize writes to its own generated file.  Machine-specific Org Notes
+;; settings are loaded earlier from the ignored var/org-notes-local.el file.
 (when (file-readable-p custom-file)
   (load custom-file nil 'nomessage))
 

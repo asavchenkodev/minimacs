@@ -456,6 +456,30 @@
     (should-error (daily-worklog-show-date "2026-02-30")
                   :type 'user-error)))
 
+(ert-deftest daily-worklog-public-date-reader-distinguishes-empty-and-broken ()
+  (daily-worklog-test--with-clean-state
+    (should-not (daily-worklog-summary-for-date "2026-08-10"))
+    (let ((file (daily-worklog--date-file "2026-08-10")))
+      (with-temp-file file
+        (insert "{broken"))
+      (should-error (daily-worklog-summary-for-date "2026-08-10")))))
+
+(ert-deftest daily-worklog-public-date-reader-includes-unsaved-memory ()
+  (daily-worklog-test--with-clean-state
+    (let* ((now (encode-time 0 0 12 10 8 2026))
+           (buffer (generate-new-buffer "public-reader-worklog-test"))
+           (entry (daily-worklog-test--entry buffer "reader" "/tmp/reader")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'current-time) (lambda () now)))
+            (daily-worklog--add-seconds "2026-08-10" entry 75)
+            (should (= 75
+                       (alist-get
+                        'totalSeconds
+                        (daily-worklog-summary-for-date "2026-08-10"))))
+            (should-not (file-exists-p
+                         (daily-worklog--date-file "2026-08-10"))))
+        (kill-buffer buffer)))))
+
 (provide 'daily-worklog-test)
 
 ;;; daily-worklog-test.el ends here
