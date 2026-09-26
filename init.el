@@ -326,6 +326,16 @@
       use-short-answers t
       custom-safe-themes t)
 
+;; Match the old Spacemacs scrolling behavior: moving past a window edge
+;; reveals the next line instead of recentering by a large block.
+(setq scroll-preserve-screen-position t
+      scroll-margin 0
+      scroll-conservatively 101)
+
+(when (boundp 'mouse-wheel-scroll-amount)
+  (setq mouse-wheel-scroll-amount '(2)
+        mouse-wheel-progressive-speed nil))
+
 (add-hook 'prog-mode-hook #'display-line-numbers-mode)
 (add-hook 'text-mode-hook #'display-line-numbers-mode)
 
@@ -1998,6 +2008,10 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   :type 'integer
   :group 'org)
 
+(defun my/org-confirm-babel-evaluate (language _body)
+  "Return nil when LANGUAGE is one of this profile's trusted languages."
+  (not (member language '("python" "emacs-lisp" "C" "C++"))))
+
 (defvar-local my/org-face-remap-cookies nil
   "Face remappings owned by `my/org-mode-settings'.")
 
@@ -2102,13 +2116,14 @@ Keep these settings local: derived modes such as Dayline own their layout."
         org-ellipsis "…"
         org-fontify-done-headline nil
         org-fontify-todo-headline nil
+        org-confirm-babel-evaluate #'my/org-confirm-babel-evaluate
         org-babel-python-command my/python-program)
   :config
   (require 'org-tempo)
   (org-babel-do-load-languages
    'org-babel-load-languages
-   '((shell . t)
-     (python . t)
+   '((python . t)
+     (emacs-lisp . t)
      (C . t))))
 
 (use-package org-notes
