@@ -72,6 +72,10 @@
 (declare-function justl-mode "justl")
 (declare-function make-recipe "justl" (&rest arguments))
 (declare-function kill-compilation "compile")
+(declare-function org-at-item-checkbox-p "org-list")
+(declare-function org-at-item-p "org-list")
+(declare-function org-insert-item "org-list")
+(declare-function org-return "org")
 (declare-function projectile-switch-project-by-name "projectile")
 (declare-function projectile-save-known-projects "projectile")
 (declare-function recompile "compile")
@@ -2012,6 +2016,27 @@ Use STYLE when non-nil; otherwise honor the nearest .clang-format file."
   "Return nil when LANGUAGE is one of this profile's trusted languages."
   (not (member language '("python" "emacs-lisp" "C" "C++"))))
 
+(defun my/org-empty-list-item-p ()
+  "Return non-nil when the current line is an empty Org list item."
+  (save-excursion
+    (beginning-of-line)
+    (and (org-at-item-p)
+         (goto-char (match-end 0))
+         (looking-at-p "\\(?:\\[[- X]\\][ \\t]*\\)?$"))))
+
+(defun my/org-return-dwim ()
+  "Continue an Org plain list with RET, like Spacemacs `evil-org-return'.
+On an empty item, remove the bullet and finish the list.  Outside an item,
+retain the normal `org-return' behavior for tables, headings, and text."
+  (interactive)
+  (cond
+   ((my/org-empty-list-item-p)
+    (delete-region (line-beginning-position) (line-end-position)))
+   ((and (eolp) (org-at-item-p))
+    (org-insert-item (org-at-item-checkbox-p)))
+   (t
+    (call-interactively #'org-return))))
+
 (defvar-local my/org-face-remap-cookies nil
   "Face remappings owned by `my/org-mode-settings'.")
 
@@ -2104,7 +2129,7 @@ Keep these settings local: derived modes such as Dayline own their layout."
         org-src-preserve-indentation nil
         org-edit-src-content-indentation 0
         org-src-tab-acts-natively t
-        org-blank-before-new-entry '((heading . t) (plain-list-item . t))
+        org-blank-before-new-entry '((heading . t) (plain-list-item . nil))
         org-auto-align-tags nil
         org-tags-column 0
         org-fold-catch-invisible-edits 'show-and-error
@@ -2120,6 +2145,8 @@ Keep these settings local: derived modes such as Dayline own their layout."
         org-babel-python-command my/python-program)
   :config
   (require 'org-tempo)
+  (keymap-set org-mode-map "RET" #'my/org-return-dwim)
+  (keymap-set org-mode-map "<return>" #'my/org-return-dwim)
   (org-babel-do-load-languages
    'org-babel-load-languages
    '((python . t)
